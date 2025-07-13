@@ -1,12 +1,15 @@
 import numpy as np
 import scanpy as sc
 
-def construct_graph(adata1, adata2, n_neighbors=15, metric='correlation'):
-    sc.pp.neighbors(adata1, n_neighbors=n_neighbors, n_pcs=None, use_rep='X', metric=metric)
+def construct_graph(adata1, adata2, n_neighbors=15, n_pcs=30, metric='correlation'):
+    sc.pp.pca(adata1, n_comps=n_pcs)
+    sc.pp.pca(adata2, n_comps=n_pcs)
+
+    sc.pp.neighbors(adata1, n_neighbors=n_neighbors, use_rep='X_pca', metric=metric)
     rows1, cols1 = adata1.obsp['connectivities'].nonzero()
     vals1 = adata1.obsp['connectivities'][(rows1, cols1)].A1
-    
-    sc.pp.neighbors(adata2, n_neighbors=n_neighbors, n_pcs=None, use_rep='X', metric=metric)
+
+    sc.pp.neighbors(adata2, n_neighbors=n_neighbors, use_rep='X_pca', metric=metric)
     rows2, cols2 = adata2.obsp['connectivities'].nonzero()
     vals2 = adata2.obsp['connectivities'][(rows2, cols2)].A1
 
@@ -36,14 +39,15 @@ def graph_smoothing(arr, edges, wt):
 
     return wt * arr + (1 - wt) * centroids
 
-def smooth_link_feat(adata1, adata2, n_neighbors=15, metric='correlation', weight=0.3):
-    link_feat1 = adata1.obsm['link_feat']
-    link_feat2 = adata2.obsm['link_feat']
+def smooth_link_feat(adata1, adata2, n_neighbors=15, metric='correlation', weight=0.3, n_pcs=30):
+    if 'link_feat' not in adata1.obsm or 'link_feat' not in adata2.obsm:
+        raise ValueError("obsm['link_feat'] is missing")
 
-    edges1, edges2 = construct_graph(adata1, adata2, n_neighbors=n_neighbors, metric=metric)
+    edges1, edges2 = construct_graph(adata1, adata2, n_neighbors=n_neighbors, metric=metric, n_pcs=n_pcs)
 
-    smooth_feat1 = graph_smoothing(arr=link_feat1, edges=edges1, wt=weight)
-    smooth_feat2 = graph_smoothing(arr=link_feat2, edges=edges2, wt=weight)
+    smooth_feat1 = graph_smoothing(arr=adata1.obsm['link_feat'], edges=edges1, wt=weight)
+    smooth_feat2 = graph_smoothing(arr=adata2.obsm['link_feat'], edges=edges2, wt=weight)
 
     adata1.obsm['link_feat'] = smooth_feat1
     adata2.obsm['link_feat'] = smooth_feat2
+
