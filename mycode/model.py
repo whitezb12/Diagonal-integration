@@ -26,6 +26,8 @@ class Model(object):
                  n_KNN=3,
                  mode='weak',
                  prior=False,
+                 alpha=2,
+                 mass=0.5,
                  celltype_col=None,
                  source_col=None):
 
@@ -48,6 +50,8 @@ class Model(object):
         self.n_KNN = n_KNN
         self.mode = mode
         self.prior = prior
+        self.mass = mass
+        self.alpha = alpha
 
         self.dataset_A = AnnDataDataset(adata1, celltype_key=celltype_col, source_key=source_col)
         self.dataset_B = AnnDataDataset(adata2, celltype_key=celltype_col, source_key=source_col)
@@ -200,16 +204,16 @@ class Model(object):
         elif self.mode == 'strong':
             c_cross = pairwise_correlation_distance(z_A.detach().cpu(), z_B.detach().cpu())
         else:
-            raise ValueError("Invalid mode for MNN computation")
+            raise ValueError("Invalid mode for distance computation")
 
         if 'celltype' in batch_A and 'celltype' in batch_B and self.prior:
-            prior_matrix = build_celltype_prior(batch_A['celltype'], batch_B['celltype'], prior=2)
+            prior_matrix = build_celltype_prior(batch_A['celltype'], batch_B['celltype'], prior=self.alpha)
         else:
-            prior_matrix = build_mnn_prior(c_cross, self.n_KNN, prior=2)
+            prior_matrix = build_mnn_prior(c_cross, self.n_KNN, prior=self.alpha)
 
         p = ot.unif(z_A.size(0), type_as=c_cross)
         q = ot.unif(z_B.size(0), type_as=c_cross)
-        plan = ot.partial.partial_wasserstein(p, q, c_cross * prior_matrix, m=0.5).to(self.device)
+        plan = ot.partial.partial_wasserstein(p, q, c_cross * prior_matrix, m=self.mass).to(self.device)
 
         z_dist = torch.mean((z_A.view(self.batch_size, 1, -1) - z_B.view(1, self.batch_size, -1))**2, dim=2)
         return torch.sum(plan * z_dist) / torch.sum(plan)
