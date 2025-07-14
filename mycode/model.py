@@ -56,25 +56,35 @@ class Model(object):
         self.dataloader_B = load_data(self.dataset_B, self.batch_size)
 
     def _init_models_and_optimizers(self):
-        self.E_A = encoder(self.dataset_A.feature_shapes['expression'], self.n_latent).to(self.device)
-        self.E_B = encoder(self.dataset_B.feature_shapes['expression'], self.n_latent).to(self.device)
+        if self.mode == 'strong':
+            shared_encoder = encoder(self.dataset_A.feature_shapes['expression'], self.n_latent).to(self.device)
+            self.E_A = shared_encoder
+            self.E_B = shared_encoder
+        else:
+            self.E_A = encoder(self.dataset_A.feature_shapes['expression'], self.n_latent).to(self.device)
+            self.E_B = encoder(self.dataset_B.feature_shapes['expression'], self.n_latent).to(self.device)
+
         self.G_A = generator(self.dataset_A.feature_shapes['expression'], self.n_latent).to(self.device)
         self.G_B = generator(self.dataset_B.feature_shapes['expression'], self.n_latent).to(self.device)
 
         self.D_Z = BinaryDiscriminator(self.n_latent).to(self.device)
+
         self.D_A = MultiClassDiscriminator(self.n_latent, self.dataset_A.source_categories).to(self.device) \
             if self.dataset_A.source_categories > 1 else None
         self.D_B = MultiClassDiscriminator(self.n_latent, self.dataset_B.source_categories).to(self.device) \
             if self.dataset_B.source_categories > 1 else None
 
-        self.params_G = list(self.E_A.parameters()) + list(self.E_B.parameters()) + \
-                        list(self.G_A.parameters()) + list(self.G_B.parameters())
+        self.params_G = list({id(p): p for m in [self.E_A, self.G_A, self.G_B] for p in m.parameters()}.values()) \
+            if self.E_A is self.E_B else \
+            list(self.E_A.parameters()) + list(self.E_B.parameters()) + list(self.G_A.parameters()) + list(self.G_B.parameters())
+
         self.optimizer_G = optim.Adam(self.params_G, lr=0.001, weight_decay=0.001)
 
         self.params_D = list(self.D_Z.parameters())
         if self.D_A: self.params_D += list(self.D_A.parameters())
         if self.D_B: self.params_D += list(self.D_B.parameters())
         self.optimizer_D = optim.Adam(self.params_D, lr=0.001, weight_decay=0.001)
+
 
     def _set_train_mode(self):
         for model in [self.E_A, self.E_B, self.G_A, self.G_B, self.D_Z, self.D_A, self.D_B]:
@@ -102,7 +112,7 @@ class Model(object):
             z_AtoB, z_BtoA = self.E_B(x_AtoB), self.E_A(x_BtoA)
             x_Arecon, x_Brecon = self.G_A(z_A), self.G_B(z_B)
 
-            for _ in range(3):
+            for _ in range(5):
                 self.optimizer_D.zero_grad()
                 loss_D_m = self.compute_discriminator_loss_inter(z_A, z_B)
                 loss_D_b = self.compute_discriminator_loss_intra(z_A, z_B, batch_A, batch_B)
