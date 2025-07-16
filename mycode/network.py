@@ -3,6 +3,21 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 
+class Prefix(nn.Module):
+    def __init__(self, base_encoder, prefix_type):
+        super().__init__()
+        self.encoder = base_encoder
+        assert prefix_type in ['A', 'B']
+        self.prefix_type = prefix_type
+
+    def forward(self, x):
+        batch_size = x.size(0)
+        if self.prefix_type == 'A':
+            prefix = torch.tensor([1., 0.], device=x.device).expand(batch_size, 2)
+        else:
+            prefix = torch.tensor([0., 1.], device=x.device).expand(batch_size, 2)
+        x = torch.cat([prefix, x], dim=1)
+        return self.encoder(x)
 
 class encoder(nn.Module):
     def __init__(self, n_input, n_latent):
