@@ -61,29 +61,33 @@ class Model(object):
 
     def _init_models_and_optimizers(self):
         if self.mode == 'strong':
-            shared_encoder = encoder(self.dataset_A.feature_shapes['expression'], self.n_latent).to(self.device)
-            self.E_A = shared_encoder
-            self.E_B = shared_encoder
+            self.shared_encoder = encoder(self.dataset_A.feature_shapes['expression'] + 2, self.n_latent).to(self.device)
+            self.E_A = Prefix(self.shared_encoder, 'A')
+            self.E_B = Prefix(self.shared_encoder, 'B')
+            """
+            self.shared_encoder = encoder(self.dataset_A.feature_shapes['expression'], self.n_latent).to(self.device)
+            self.E_A = self.shared_encoder
+            self.E_B = self.shared_encoder
+            """
+            self.shared_decoder = generator(self.dataset_A.feature_shapes['expression'], self.n_latent + 2).to(self.device)
+            self.G_A = Prefix(self.shared_decoder, 'A')
+            self.G_B = Prefix(self.shared_decoder, 'B')
+            self.params_G = list(self.shared_encoder.parameters()) + list(self.shared_decoder.parameters())
         else:
             self.E_A = encoder(self.dataset_A.feature_shapes['expression'], self.n_latent).to(self.device)
             self.E_B = encoder(self.dataset_B.feature_shapes['expression'], self.n_latent).to(self.device)
-
-        self.G_A = generator(self.dataset_A.feature_shapes['expression'], self.n_latent).to(self.device)
-        self.G_B = generator(self.dataset_B.feature_shapes['expression'], self.n_latent).to(self.device)
+            self.G_A = generator(self.dataset_A.feature_shapes['expression'], self.n_latent).to(self.device)
+            self.G_B = generator(self.dataset_B.feature_shapes['expression'], self.n_latent).to(self.device)
+            self.params_G = list(self.E_A.parameters()) + list(self.E_B.parameters()) + \
+                            list(self.G_A.parameters()) + list(self.G_B.parameters())
+        self.optimizer_G = optim.Adam(self.params_G, lr=0.001, weight_decay=0.001)
+        
 
         self.D_Z = BinaryDiscriminator(self.n_latent).to(self.device)
-
         self.D_A = MultiClassDiscriminator(self.n_latent, self.dataset_A.source_categories).to(self.device) \
             if self.dataset_A.source_categories > 1 else None
         self.D_B = MultiClassDiscriminator(self.n_latent, self.dataset_B.source_categories).to(self.device) \
             if self.dataset_B.source_categories > 1 else None
-
-        self.params_G = list({id(p): p for m in [self.E_A, self.G_A, self.G_B] for p in m.parameters()}.values()) \
-            if self.E_A is self.E_B else \
-            list(self.E_A.parameters()) + list(self.E_B.parameters()) + list(self.G_A.parameters()) + list(self.G_B.parameters())
-
-        self.optimizer_G = optim.Adam(self.params_G, lr=0.001, weight_decay=0.001)
-
         self.params_D = list(self.D_Z.parameters())
         if self.D_A: self.params_D += list(self.D_A.parameters())
         if self.D_B: self.params_D += list(self.D_B.parameters())
@@ -225,6 +229,3 @@ class Model(object):
             f"OT: {self.lambdaOT * loss_dict['OT']:.4f} | "
             f"mGAN: {self.lambdamGAN * loss_dict['mGAN']:.4f} | "
             f"bGAN: {self.lambdabGAN * loss_dict['bGAN']:.4f}")
-
-
-
