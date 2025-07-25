@@ -3,98 +3,133 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 
-class Prefix(nn.Module):
-    def __init__(self, base_encoder, prefix_type):
+class DomainWrapper(nn.Module):
+    def __init__(self, base_model, domain, use_prefix=True, use_domain_bn=True):
         super().__init__()
-        self.encoder = base_encoder
-        assert prefix_type in ['A', 'B']
-        self.prefix_type = prefix_type
+        assert domain in ['A', 'B']
+        self.model = base_model
+        self.domain = domain
+        self.use_prefix = use_prefix
+        self.use_domain_bn = use_domain_bn
+
+        if use_prefix:
+            self.register_buffer('prefix_tensor', torch.tensor([1., 0.]) if domain == 'A' else torch.tensor([0., 1.]))
 
     def forward(self, x):
-        batch_size = x.size(0)
-        if self.prefix_type == 'A':
-            prefix = torch.tensor([1., 0.], device=x.device).expand(batch_size, 2)
-        else:
-            prefix = torch.tensor([0., 1.], device=x.device).expand(batch_size, 2)
-        x = torch.cat([prefix, x], dim=1)
-        return self.encoder(x)
+        if self.use_prefix:
+            batch_size = x.size(0)
+            prefix = self.prefix_tensor.expand(batch_size, 2)
+            x = torch.cat([prefix, x], dim=1)
 
+        if self.use_domain_bn:
+            return self.model(x, domain=self.domain)
+        else:
+            return self.model(x)
+
+        
 class encoder(nn.Module):
-    def __init__(self, n_input, n_latent):
-        super(encoder, self).__init__()
-        self.n_input = n_input
+    def __init__(self, n_input, n_latent, use_prefix=True, use_domain_bn=True):
+        super().__init__()
+        self.use_prefix = use_prefix
+        self.use_domain_bn = use_domain_bn
         self.n_latent = n_latent
         n_hidden = 512
 
-        self.W_1 = nn.Parameter(torch.Tensor(n_hidden, self.n_input).normal_(mean=0.0, std=0.1))
-        self.b_1 = nn.Parameter(torch.Tensor(n_hidden).normal_(mean=0.0, std=0.1))
+        self.input_dim = n_input + 2 if use_prefix else n_input
 
-        self.W_2 = nn.Parameter(torch.Tensor(self.n_latent, n_hidden).normal_(mean=0.0, std=0.1))
-        self.b_2 = nn.Parameter(torch.Tensor(self.n_latent).normal_(mean=0.0, std=0.1))
+        self.fc1 = nn.Linear(self.input_dim, n_hidden)
+        if use_domain_bn:
+            self.bn_A = nn.BatchNorm1d(n_hidden)
+            self.bn_B = nn.BatchNorm1d(n_hidden)
+        else:
+            self.bn = nn.BatchNorm1d(n_hidden)
+        self.fc2 = nn.Linear(n_hidden, n_latent)
 
-    def forward(self, x):
-        h = F.relu(F.linear(x, self.W_1, self.b_1))
-        z = F.linear(h, self.W_2, self.b_2)
+    def forward(self, x, domain=None):
+        h = self.fc1(x)
+
+        if self.use_domain_bn:
+            if domain == 'A':
+                h = self.bn_A(h)
+            elif domain == 'B':
+                h = self.bn_B(h)
+            else:
+                raise ValueError("Domain must be 'A' or 'B' when use_domain_bn is True")
+        else:
+            h = self.bn(h)
+
+        h = F.relu(h)
+        z = self.fc2(h)
         return z
 
+
 class generator(nn.Module):
-    def __init__(self, n_input, n_latent):
-        super(generator, self).__init__()
-        self.n_input = n_input
-        self.n_latent = n_latent
+    def __init__(self, n_input, n_latent, loss_type='BCE', use_prefix=True, use_domain_bn=True):
+        super().__init__()
+        self.loss_type = loss_type
+        self.use_prefix = use_prefix
+        self.use_domain_bn = use_domain_bn
         n_hidden = 512
 
-        self.W_1 = nn.Parameter(torch.Tensor(n_hidden, self.n_latent).normal_(mean=0.0, std=0.1))
-        self.b_1 = nn.Parameter(torch.Tensor(n_hidden).normal_(mean=0.0, std=0.1))
+        self.input_dim = n_latent + 2 if use_prefix else n_latent
 
-        self.W_2 = nn.Parameter(torch.Tensor(self.n_input, n_hidden).normal_(mean=0.0, std=0.1))
-        self.b_2 = nn.Parameter(torch.Tensor(self.n_input).normal_(mean=0.0, std=0.1))
+        self.fc1 = nn.Linear(self.input_dim, n_hidden)
+        if use_domain_bn:
+            self.bn_A = nn.BatchNorm1d(n_hidden)
+            self.bn_B = nn.BatchNorm1d(n_hidden)
+        else:
+            self.bn = nn.BatchNorm1d(n_hidden)
+        self.fc2 = nn.Linear(n_hidden, n_input)
 
-    def forward(self, z):
-        h = F.relu(F.linear(z, self.W_1, self.b_1))
-        x = F.linear(h, self.W_2, self.b_2)
+    def forward(self, z, domain=None):
+        h = self.fc1(z)
+
+        if self.use_domain_bn:
+            if domain == 'A':
+                h = self.bn_A(h)
+            elif domain == 'B':
+                h = self.bn_B(h)
+            else:
+                raise ValueError("Domain must be 'A' or 'B'")
+        else:
+            h = self.bn(h)
+
+        h = F.relu(h)
+        x = self.fc2(h)
+        if self.loss_type == 'BCE':
+            x = torch.sigmoid(x)
         return x
+
 
 class BinaryDiscriminator(nn.Module):
     def __init__(self, n_input):
-        super(BinaryDiscriminator, self).__init__()
-        self.n_input = n_input
+        super().__init__()
         n_hidden = 512
-
-        self.W_1 = nn.Parameter(torch.Tensor(n_hidden, self.n_input).normal_(mean=0.0, std=0.1))
-        self.b_1 = nn.Parameter(torch.Tensor(n_hidden).normal_(mean=0.0, std=0.1))
-
-        self.W_2 = nn.Parameter(torch.Tensor(n_hidden, n_hidden).normal_(mean=0.0, std=0.1))
-        self.b_2 = nn.Parameter(torch.Tensor(n_hidden).normal_(mean=0.0, std=0.1))
-
-        self.W_3 = nn.Parameter(torch.Tensor(1, n_hidden).normal_(mean=0.0, std=0.1))
-        self.b_3 = nn.Parameter(torch.Tensor(1).normal_(mean=0.0, std=0.1))
+        self.fc1 = nn.Linear(n_input, n_hidden)
+        self.bn1 = nn.BatchNorm1d(n_hidden)
+        self.fc2 = nn.Linear(n_hidden, n_hidden)
+        self.bn2 = nn.BatchNorm1d(n_hidden)
+        self.fc3 = nn.Linear(n_hidden, 1)
 
     def forward(self, x):
-        h = F.relu(F.linear(x, self.W_1, self.b_1))
-        h = F.relu(F.linear(h, self.W_2, self.b_2))
-        score = F.linear(h, self.W_3, self.b_3)
+        h = F.relu(self.bn1(self.fc1(x)))
+        h = F.relu(self.bn2(self.fc2(h)))
+        score = self.fc3(h)
         return torch.clamp(score, min=-50.0, max=50.0)
 
 
 class MultiClassDiscriminator(nn.Module):
     def __init__(self, n_input, num_classes):
-        super(MultiClassDiscriminator, self).__init__()
-        self.n_input = n_input
-        self.num_classes = num_classes
+        super().__init__()
         n_hidden = 512
-
-        self.W_1 = nn.Parameter(torch.Tensor(n_hidden, self.n_input).normal_(mean=0.0, std=0.1))
-        self.b_1 = nn.Parameter(torch.Tensor(n_hidden).normal_(mean=0.0, std=0.1))
-
-        self.W_2 = nn.Parameter(torch.Tensor(n_hidden, n_hidden).normal_(mean=0.0, std=0.1))
-        self.b_2 = nn.Parameter(torch.Tensor(n_hidden).normal_(mean=0.0, std=0.1))
-
-        self.W_3 = nn.Parameter(torch.Tensor(num_classes, n_hidden).normal_(mean=0.0, std=0.1))
-        self.b_3 = nn.Parameter(torch.Tensor(num_classes).normal_(mean=0.0, std=0.1))
+        self.fc1 = nn.Linear(n_input, n_hidden)
+        self.bn1 = nn.BatchNorm1d(n_hidden)
+        self.fc2 = nn.Linear(n_hidden, n_hidden)
+        self.bn2 = nn.BatchNorm1d(n_hidden)
+        self.fc3 = nn.Linear(n_hidden, num_classes)
 
     def forward(self, x):
-        h = F.relu(F.linear(x, self.W_1, self.b_1))
-        h = F.relu(F.linear(h, self.W_2, self.b_2))
-        logits = F.linear(h, self.W_3, self.b_3)
+        h = F.relu(self.bn1(self.fc1(x)))
+        h = F.relu(self.bn2(self.fc2(h)))
+        logits = self.fc3(h)
         return logits
