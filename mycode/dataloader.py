@@ -104,6 +104,7 @@ class InfiniteRandomSampler(Sampler):
     def __iter__(self):
         while True:
             yield random.choices(range(self.sample_num), k=self.batch_size)
+            #yield random.choices(range(self.sample_num), k=self.batch_size)  #无放回采样
 
     def __len__(self) -> int:
         return 10**10
