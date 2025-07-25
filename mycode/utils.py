@@ -1,26 +1,29 @@
 import numpy as np
-from sklearn.preprocessing import MaxAbsScaler, StandardScaler
-from anndata import AnnData
 import torch
+from typing import Optional
+from anndata import AnnData
+from sklearn.preprocessing import MaxAbsScaler, StandardScaler
 from scipy.sparse import issparse, csc_matrix, csr_matrix
 import warnings
+
 
 def clr(adata: AnnData, axis: int = 0) -> None:
     if axis not in [0, 1]:
         raise ValueError("axis must be 0 or 1")
 
     if issparse(adata.X) and axis == 0 and not isinstance(adata.X, csc_matrix):
-        warnings("adata.X is sparse but not in CSC format. Converting to CSC.")
+        warnings.warn("adata.X is sparse but not in CSC format. Converting to CSC.")
         x = csc_matrix(adata.X)
     elif issparse(adata.X) and axis == 1 and not isinstance(adata.X, csr_matrix):
-        warnings("adata.X is sparse but not in CSR format. Converting to CSR.")
+        warnings.warn("adata.X is sparse but not in CSR format. Converting to CSR.")
         x = csr_matrix(adata.X)
     else:
         x = adata.X
 
     if issparse(x):
         x.data /= np.repeat(
-            np.exp(np.log1p(x).sum(axis=axis).A / x.shape[axis]), x.getnnz(axis=axis)
+            np.exp(np.log1p(x).sum(axis=axis).A / x.shape[axis]),
+            x.getnnz(axis=axis)
         )
         np.log1p(x.data, out=x.data)
     else:
@@ -33,11 +36,17 @@ def clr(adata: AnnData, axis: int = 0) -> None:
 
 
 def batch_scale(adata: AnnData, method: str = 'maxabs') -> None:
-    from scipy.sparse import issparse
-    from sklearn.preprocessing import MaxAbsScaler, StandardScaler
+    if 'batch' in adata.obs:
+        batches = adata.obs['batch'].unique()
+    else:
+        print("No 'batch' found in adata.obs, applying scaling to all data.")
+        batches = [None]
 
-    for b in adata.obs['batch'].unique():
-        idx = np.where(adata.obs['batch'] == b)[0]
+    for b in batches:
+        if b is None:
+            idx = np.arange(adata.n_obs)
+        else:
+            idx = np.where(adata.obs['batch'] == b)[0]
         X_batch = adata.X[idx]
 
         if issparse(X_batch):
@@ -56,7 +65,6 @@ def batch_scale(adata: AnnData, method: str = 'maxabs') -> None:
                 scaler = MaxAbsScaler(copy=False).fit(X_batch)
             else:
                 raise ValueError(f"Unknown scaling method: {method}. Choose 'maxabs' or 'standard'.")
-
             adata.X[idx] = scaler.transform(X_batch)
 
 
@@ -69,7 +77,11 @@ def build_mnn_prior(Sim: torch.Tensor, k: int, prior: float = 2.0) -> torch.Tens
     return torch.where(mnn_mask, 1.0 / prior, prior)
 
 
-def build_celltype_prior(list1, list2, prior: float = 2.0) -> torch.Tensor:
+def build_celltype_prior(
+    list1: list[str],
+    list2: list[str],
+    prior: float = 2.0
+) -> torch.Tensor:
     arr1 = np.array(list1)
     arr2 = np.array(list2)
     is_same = arr1[:, None] == arr2
@@ -77,7 +89,10 @@ def build_celltype_prior(list1, list2, prior: float = 2.0) -> torch.Tensor:
     return torch.where(is_same_tensor, 1.0 / prior, prior)
 
 
-def pairwise_correlation_distance(X: torch.Tensor, Y: torch.Tensor = None) -> torch.Tensor:
+def pairwise_correlation_distance(
+    X: torch.Tensor,
+    Y: Optional[torch.Tensor] = None
+) -> torch.Tensor:
     if Y is None:
         Y = X
     X_centered = X - X.mean(dim=1, keepdim=True)
@@ -88,3 +103,23 @@ def pairwise_correlation_distance(X: torch.Tensor, Y: torch.Tensor = None) -> to
     std_prod = std_X.unsqueeze(1) * std_Y.unsqueeze(0)
     corr = cov / (std_prod + 1e-8)
     return 1 - corr
+
+
+def bernoulli_kl(
+    p: torch.Tensor,
+    q: torch.Tensor,
+    eps: float = 1e-8
+) -> torch.Tensor:
+    p = p.clamp(min=eps, max=1 - eps)
+    q = q.clamp(min=eps, max=1 - eps)
+    return p * torch.log(p / q) + (1 - p) * torch.log((1 - p) / (1 - q))
+
+
+def bernoulli_sym_kl(
+    p: torch.Tensor,
+    q: torch.Tensor,
+    eps: float = 1e-8
+) -> torch.Tensor:
+    kl_pq = bernoulli_kl(p, q, eps)
+    kl_qp = bernoulli_kl(q, p, eps)
+    return 0.5 * (kl_pq + kl_qp).mean(dim=1).mean()
