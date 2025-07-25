@@ -1,7 +1,17 @@
 import numpy as np
 import scanpy as sc
+from anndata import AnnData
+from typing import Tuple, Union
 
-def construct_graph(adata1, adata2, n_neighbors=15, n_pcs=30, metric='correlation'):
+
+def construct_graph(
+    adata1: AnnData,
+    adata2: AnnData,
+    n_neighbors: int = 15,
+    n_pcs: int = 30,
+    metric: str = 'correlation'
+) -> Tuple[Tuple[np.ndarray, np.ndarray, np.ndarray], Tuple[np.ndarray, np.ndarray, np.ndarray]]:
+
     sc.pp.pca(adata1, n_comps=n_pcs)
     sc.pp.pca(adata2, n_comps=n_pcs)
 
@@ -17,7 +27,13 @@ def construct_graph(adata1, adata2, n_neighbors=15, n_pcs=30, metric='correlatio
     edges2 = (rows2, cols2, vals2)
     return edges1, edges2
 
-def graph_smoothing(arr, edges, wt):
+
+def graph_smoothing(
+    arr: np.ndarray,
+    edges: Union[Tuple[np.ndarray, np.ndarray], Tuple[np.ndarray, np.ndarray, np.ndarray]],
+    wt: float
+) -> np.ndarray:
+
     n_samples, n_features = arr.shape
     src = np.asarray(edges[0])
     tgt = np.asarray(edges[1])
@@ -39,9 +55,18 @@ def graph_smoothing(arr, edges, wt):
 
     return wt * arr + (1 - wt) * centroids
 
-def smooth_link_feat(adata1, adata2, n_neighbors=15, metric='correlation', weight=0.3, n_pcs=30):
+
+def smooth_link_feat(
+    adata1: AnnData,
+    adata2: AnnData,
+    n_neighbors: int = 15,
+    metric: str = 'correlation',
+    weight: float = 0.3,
+    n_pcs: int = 30
+) -> None:
+    
     if 'link_feat' not in adata1.obsm or 'link_feat' not in adata2.obsm:
-        raise ValueError("obsm['link_feat'] is missing")
+        raise ValueError("obsm['link_feat'] is missing in one of the AnnData objects.")
 
     edges1, edges2 = construct_graph(adata1, adata2, n_neighbors=n_neighbors, metric=metric, n_pcs=n_pcs)
 
@@ -50,4 +75,3 @@ def smooth_link_feat(adata1, adata2, n_neighbors=15, metric='correlation', weigh
 
     adata1.obsm['link_feat'] = smooth_feat1
     adata2.obsm['link_feat'] = smooth_feat2
-
