@@ -18,7 +18,7 @@ class DomainWrapper(nn.Module):
     def forward(self, x):
         if self.use_prefix:
             batch_size = x.size(0)
-            prefix = self.prefix_tensor.expand(batch_size, 2)
+            prefix = self.prefix_tensor.expand(batch_size, 2).to(x.device)
             x = torch.cat([prefix, x], dim=1)
 
         if self.use_domain_bn:
