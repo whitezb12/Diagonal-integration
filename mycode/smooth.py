@@ -18,13 +18,13 @@ def construct_graph(
     sc.pp.neighbors(adata1, n_neighbors=n_neighbors, use_rep='X_pca', metric=metric)
     rows1, cols1 = adata1.obsp['connectivities'].nonzero()
     vals1 = adata1.obsp['connectivities'][(rows1, cols1)].A1
+    edges1 = (rows1, cols1, vals1)
 
     sc.pp.neighbors(adata2, n_neighbors=n_neighbors, use_rep='X_pca', metric=metric)
     rows2, cols2 = adata2.obsp['connectivities'].nonzero()
     vals2 = adata2.obsp['connectivities'][(rows2, cols2)].A1
-
-    edges1 = (rows1, cols1, vals1)
     edges2 = (rows2, cols2, vals2)
+
     return edges1, edges2
 
 
@@ -49,11 +49,11 @@ def graph_smoothing(
     np.add.at(smoothed, src, arr[tgt] * w[:, None])
     np.add.at(total_weight, src, w[:, None])
 
-    mask = total_weight.squeeze() > 0
     centroids = np.copy(arr)
+    mask = total_weight.squeeze() > 0
     centroids[mask] = smoothed[mask] / total_weight[mask]
 
-    return wt * arr + (1 - wt) * centroids
+    return wt * arr + (1.0 - wt) * centroids
 
 
 def smooth_link_feat(
@@ -64,14 +64,20 @@ def smooth_link_feat(
     weight: float = 0.3,
     n_pcs: int = 30
 ) -> None:
-    
+
     if 'link_feat' not in adata1.obsm or 'link_feat' not in adata2.obsm:
-        raise ValueError("obsm['link_feat'] is missing in one of the AnnData objects.")
+        raise ValueError("Missing 'link_feat' in obsm of one or both AnnData objects.")
 
-    edges1, edges2 = construct_graph(adata1, adata2, n_neighbors=n_neighbors, metric=metric, n_pcs=n_pcs)
+    edges1, edges2 = construct_graph(
+        adata1=adata1,
+        adata2=adata2,
+        n_neighbors=n_neighbors,
+        n_pcs=n_pcs,
+        metric=metric
+    )
 
-    smooth_feat1 = graph_smoothing(arr=adata1.obsm['link_feat'], edges=edges1, wt=weight)
-    smooth_feat2 = graph_smoothing(arr=adata2.obsm['link_feat'], edges=edges2, wt=weight)
+    smoothed1 = graph_smoothing(adata1.obsm['link_feat'], edges1, wt=weight)
+    smoothed2 = graph_smoothing(adata2.obsm['link_feat'], edges2, wt=weight)
 
-    adata1.obsm['link_feat'] = smooth_feat1
-    adata2.obsm['link_feat'] = smooth_feat2
+    adata1.obsm['link_feat'] = smoothed1
+    adata2.obsm['link_feat'] = smoothed2
