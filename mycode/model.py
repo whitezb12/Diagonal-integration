@@ -7,31 +7,33 @@ import ot
 from mycode.dataloader import *
 from mycode.utils import *
 from mycode.network import *
-from typing import Optional, Dict
+from typing import Optional, Dict, Literal
 
 
 class Model(object):
-    def __init__(self,
-                 adata1,
-                 adata2,
-                 batch_size: int = 500,
-                 training_steps: int = 10000,
-                 seed: int = 1234,
-                 n_latent: int = 16,
-                 lambdaAE: float = 10.0,
-                 lambdaLA: float = 10.0,
-                 lambdaOT: float = 1.0,
-                 lambdamGAN: float = 1.0,
-                 lambdabGAN: float = 1.0,
-                 n_KNN: int = 3,
-                 mode: str = 'weak',
-                 use_prior: bool = False,
-                 alpha: float = 2,
-                 mass: float = 0.5,
-                 celltype_col: Optional[str] = None,
-                 source_col: Optional[str] = None,
-                 loss_type: Literal['MSE', 'BCE'] = 'MSE') -> None:
-
+    def __init__(
+        self,
+        adata1,
+        adata2,
+        batch_size: int = 500,
+        training_steps: int = 10000,
+        seed: int = 1234,
+        n_latent: int = 16,
+        lambdaAE: float = 10.0,
+        lambdaLA: float = 10.0,
+        lambdaOT: float = 1.0,
+        lambdamGAN: float = 1.0,
+        lambdabGAN: float = 1.0,
+        lambdaSWD: float = 1.0,
+        n_KNN: int = 3,
+        mode: str = 'weak',
+        use_prior: bool = False,
+        alpha: float = 2,
+        mass: float = 0.95,
+        celltype_col: Optional[str] = None,
+        source_col: Optional[str] = None,
+        loss_type: Literal['MSE', 'BCE'] = 'MSE',
+    ) -> None:
         self.device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
         torch.manual_seed(seed)
@@ -48,6 +50,7 @@ class Model(object):
         self.lambdaLA = lambdaLA
         self.lambdamGAN = lambdamGAN
         self.lambdabGAN = lambdabGAN
+        self.lambdaSWD = lambdaSWD
         self.n_KNN = n_KNN
         self.mode = mode
         self.use_prior = use_prior
@@ -70,12 +73,20 @@ class Model(object):
 
         for step in range(self.training_steps):
             batch_A, batch_B = next(iterator_A), next(iterator_B)
-            x_A, x_B = batch_A['expression'].float().to(self.device), batch_B['expression'].float().to(self.device)
+            x_A = batch_A['expression'].float().to(self.device)
+            x_B = batch_B['expression'].float().to(self.device)
 
-            z_A, z_B = self.E_A(x_A), self.E_B(x_B)
-            x_AtoB, x_BtoA = self.G_B(z_A), self.G_A(z_B)
-            z_AtoB, z_BtoA = self.E_B(x_AtoB), self.E_A(x_BtoA)
-            x_Arecon, x_Brecon = self.G_A(z_A), self.G_B(z_B)
+            z_A = self.E_A(x_A)
+            z_B = self.E_B(x_B)
+
+            x_AtoB = self.G_B(z_A)
+            x_BtoA = self.G_A(z_B)
+
+            z_AtoB = self.E_B(x_AtoB)
+            z_BtoA = self.E_A(x_BtoA)
+
+            x_Arecon = self.G_A(z_A)
+            x_Brecon = self.G_B(z_B)
 
             self.optimizer_D.zero_grad()
             loss_D_m = self.compute_discriminator_loss_inter(z_A, z_B)
@@ -90,13 +101,17 @@ class Model(object):
                 'OT': self.compute_ot_loss(z_A, z_B, batch_A, batch_B),
                 'mGAN': self.compute_generator_loss_inter(z_A, z_B),
                 'bGAN': self.compute_generator_loss_intra(z_A, z_B, batch_A, batch_B),
+                'SWD': self.sliced_wasserstein_distance(z_A, z_B),
             }
 
-            total_loss = (self.lambdaAE * loss_dict['AE'] +
-                          self.lambdaLA * loss_dict['LA'] +
-                          self.lambdaOT * loss_dict['OT'] +
-                          self.lambdamGAN * loss_dict['mGAN'] +
-                          self.lambdabGAN * loss_dict['bGAN'])
+            total_loss = (
+                self.lambdaAE * loss_dict['AE']
+                + self.lambdaLA * loss_dict['LA']
+                + self.lambdaOT * loss_dict['OT']
+                + self.lambdamGAN * loss_dict['mGAN']
+                + self.lambdabGAN * loss_dict['bGAN']
+                + self.lambdaSWD * loss_dict['SWD']
+            )
 
             self.optimizer_G.zero_grad()
             total_loss.backward()
@@ -129,8 +144,6 @@ class Model(object):
         print(f"Processed {len(x_A) + len(x_B)} samples")
         print(f"Latent space shape: {self.latent.shape}")
 
-
-
     def compute_ae_loss(self, x: torch.Tensor, x_recon: torch.Tensor) -> torch.Tensor:
         if self.loss_type == 'MSE':
             return F.mse_loss(x, x_recon)
@@ -140,12 +153,7 @@ class Model(object):
             raise ValueError(f"Unsupported loss type: {self.loss_type}")
 
     def compute_latent_align_loss(self, z: torch.Tensor, z_to: torch.Tensor) -> torch.Tensor:
-        if self.loss_type == 'MSE':
-            return F.mse_loss(z, z_to)
-        elif self.loss_type == 'BCE':
-            return bernoulli_sym_kl(torch.sigmoid(z), torch.sigmoid(z_to))
-        else:
-            raise ValueError(f"Unsupported loss type: {self.loss_type}")
+        return F.mse_loss(z, z_to)
 
     def compute_discriminator_loss_inter(self, z_A: torch.Tensor, z_B: torch.Tensor) -> torch.Tensor:
         return F.softplus(-self.D_Z(z_A.detach())).mean() + F.softplus(self.D_Z(z_B.detach())).mean()
@@ -158,6 +166,9 @@ class Model(object):
             loss += F.cross_entropy(self.D_B(z_B.detach()), batch_B['source'].to(self.device))
         return loss
 
+    def compute_generator_loss_inter(self, z_A: torch.Tensor, z_B: torch.Tensor) -> torch.Tensor:
+        return -(F.softplus(-self.D_Z(z_A)) + F.softplus(self.D_Z(z_B))).mean()
+
     def compute_generator_loss_intra(self, z_A: torch.Tensor, z_B: torch.Tensor, batch_A: dict, batch_B: dict) -> torch.Tensor:
         loss = 0.0
         if self.D_A:
@@ -165,9 +176,6 @@ class Model(object):
         if self.D_B:
             loss += -F.cross_entropy(self.D_B(z_B), batch_B['source'].to(self.device))
         return loss
-
-    def compute_generator_loss_inter(self, z_A: torch.Tensor, z_B: torch.Tensor) -> torch.Tensor:
-        return -(F.softplus(-self.D_Z(z_A)) + F.softplus(self.D_Z(z_B))).mean()
 
     def compute_ot_loss(self, z_A: torch.Tensor, z_B: torch.Tensor, batch_A: dict, batch_B: dict) -> torch.Tensor:
         if 'link_feat' in batch_A and 'link_feat' in batch_B and self.mode == 'weak':
@@ -182,52 +190,90 @@ class Model(object):
         else:
             prior_matrix = build_mnn_prior(c_cross, self.n_KNN, prior=self.alpha)
 
-        p = ot.unif(z_A.size(0), type_as=c_cross)
-        q = ot.unif(z_B.size(0), type_as=c_cross)
-        plan = ot.partial.partial_wasserstein(p, q, c_cross * prior_matrix, m=self.mass).to(self.device)
+        latent_dist = pairwise_correlation_distance(z_A.detach().cpu(), z_B.detach().cpu())
+        M = (c_cross + latent_dist) * prior_matrix
+        p = ot.unif(z_A.size(0), type_as=M)
+        q = ot.unif(z_B.size(0), type_as=M)
+        plan = ot.unbalanced.sinkhorn_knopp_unbalanced(p, q, M, reg=0.05, reg_m=0.5).to(self.device)
+        z_dist = torch.cdist(z_A, z_B, p=2).pow(2)
+        ot_loss = torch.sum(plan * z_dist) / torch.sum(plan)
+        return ot_loss
 
-        z_dist = torch.mean((z_A.view(self.batch_size, 1, -1) - z_B.view(1, self.batch_size, -1)) ** 2, dim=2)
-        return torch.sum(plan * z_dist) / torch.sum(plan)
+    def sliced_wasserstein_distance(self, z_A: torch.Tensor, z_B: torch.Tensor, num_projections: int = 50, p: int = 2) -> torch.Tensor:
+        projections = torch.randn((num_projections, self.n_latent), device=self.device)
+        projections = projections / torch.norm(projections, dim=1, keepdim=True)
+        proj_A = z_A @ projections.T
+        proj_B = z_B @ projections.T
+        proj_A_sorted, _ = torch.sort(proj_A, dim=0)
+        proj_B_sorted, _ = torch.sort(proj_B, dim=0)
+        distances = (proj_A_sorted - proj_B_sorted).abs().pow(p).mean(dim=0)
+        return distances.mean().pow(1 / p)
 
     def _init_models_and_optimizers(self) -> None:
         if self.mode == 'strong':
-            self.shared_encoder = encoder(self.dataset_A.feature_shapes['expression'], self.n_latent,
-                                          use_prefix=False, use_domain_bn=False).to(self.device)
-            self.E_A = DomainWrapper(self.shared_encoder, domain='A', use_prefix=False, use_domain_bn=False)
-            self.E_B = DomainWrapper(self.shared_encoder, domain='B', use_prefix=False, use_domain_bn=False)
-            self.shared_decoder = generator(self.dataset_A.feature_shapes['expression'], self.n_latent,
-                                            loss_type=self.loss_type, use_prefix=False, use_domain_bn=True).to(self.device)
-            self.G_A = DomainWrapper(self.shared_decoder, domain='A', use_prefix=False, use_domain_bn=True)
-            self.G_B = DomainWrapper(self.shared_decoder, domain='B', use_prefix=False, use_domain_bn=True)
+            self.shared_encoder = Encoder(
+                self.dataset_A.feature_shapes['expression'], self.n_latent, use_prefix=True, use_domain_bn=True
+            ).to(self.device)
+            self.E_A = DomainWrapper(self.shared_encoder, domain='A', use_prefix=True, use_domain_bn=True)
+            self.E_B = DomainWrapper(self.shared_encoder, domain='B', use_prefix=True, use_domain_bn=True)
+            self.shared_decoder = Generator(
+                self.dataset_A.feature_shapes['expression'],
+                self.n_latent,
+                loss_type=self.loss_type,
+                use_prefix=True,
+                use_domain_bn=True,
+            ).to(self.device)
+            self.G_A = DomainWrapper(self.shared_decoder, domain='A', use_prefix=True, use_domain_bn=True)
+            self.G_B = DomainWrapper(self.shared_decoder, domain='B', use_prefix=True, use_domain_bn=True)
             self.params_G = list(self.shared_encoder.parameters()) + list(self.shared_decoder.parameters())
         else:
-            self.E_A = encoder(self.dataset_A.feature_shapes['expression'], self.n_latent,
-                               use_prefix=False, use_domain_bn=False).to(self.device)
-            self.E_B = encoder(self.dataset_B.feature_shapes['expression'], self.n_latent,
-                               use_prefix=False, use_domain_bn=False).to(self.device)
-            self.G_A = generator(self.dataset_A.feature_shapes['expression'], self.n_latent,
-                                 loss_type=self.loss_type, use_prefix=False, use_domain_bn=False).to(self.device)
-            self.G_B = generator(self.dataset_B.feature_shapes['expression'], self.n_latent,
-                                 loss_type=self.loss_type, use_prefix=False, use_domain_bn=False).to(self.device)
-            self.params_G = list(self.E_A.parameters()) + list(self.E_B.parameters()) + \
-                            list(self.G_A.parameters()) + list(self.G_B.parameters())
+            self.E_A = Encoder(
+                self.dataset_A.feature_shapes['expression'], self.n_latent, use_prefix=False, use_domain_bn=False
+            ).to(self.device)
+            self.E_B = Encoder(
+                self.dataset_B.feature_shapes['expression'], self.n_latent, use_prefix=False, use_domain_bn=False
+            ).to(self.device)
+            self.G_A = Generator(
+                self.dataset_A.feature_shapes['expression'],
+                self.n_latent,
+                loss_type=self.loss_type,
+                use_prefix=False,
+                use_domain_bn=False,
+            ).to(self.device)
+            self.G_B = Generator(
+                self.dataset_B.feature_shapes['expression'],
+                self.n_latent,
+                loss_type=self.loss_type,
+                use_prefix=False,
+                use_domain_bn=False,
+            ).to(self.device)
+            self.params_G = (
+                list(self.E_A.parameters())
+                + list(self.E_B.parameters())
+                + list(self.G_A.parameters())
+                + list(self.G_B.parameters())
+            )
 
-        self.optimizer_G = optim.Adam(self.params_G, lr=0.001, weight_decay=0.001)
+        self.optimizer_G = optim.AdamW(self.params_G, lr=0.001, weight_decay=0.0)
 
         self.D_Z = BinaryDiscriminator(self.n_latent).to(self.device)
-        self.D_A = MultiClassDiscriminator(self.n_latent, self.dataset_A.source_categories).to(self.device) \
-            if self.dataset_A.source_categories > 1 else None
-        self.D_B = MultiClassDiscriminator(self.n_latent, self.dataset_B.source_categories).to(self.device) \
-            if self.dataset_B.source_categories > 1 else None
+        self.D_A = (
+            MultiClassDiscriminator(self.n_latent, self.dataset_A.source_categories).to(self.device)
+            if self.dataset_A.source_categories > 1
+            else None
+        )
+        self.D_B = (
+            MultiClassDiscriminator(self.n_latent, self.dataset_B.source_categories).to(self.device)
+            if self.dataset_B.source_categories > 1
+            else None
+        )
 
         self.params_D = list(self.D_Z.parameters())
         if self.D_A:
             self.params_D += list(self.D_A.parameters())
         if self.D_B:
             self.params_D += list(self.D_B.parameters())
-        self.optimizer_D = optim.Adam(self.params_D, lr=0.001, weight_decay=0.001)
-
-
+        self.optimizer_D = optim.AdamW(self.params_D, lr=0.001, weight_decay=0.0)
 
     def _set_train_mode(self) -> None:
         for model in [self.E_A, self.E_B, self.G_A, self.G_B, self.D_Z, self.D_A, self.D_B]:
@@ -240,9 +286,12 @@ class Model(object):
                 model.eval()
 
     def log(self, step: int, loss_dict: Dict[str, torch.Tensor]) -> None:
-        print(f"Step {step} | "
-              f"AE: {self.lambdaAE * loss_dict['AE']:.4f} | "
-              f"LA: {self.lambdaLA * loss_dict['LA']:.4f} | "
-              f"OT: {self.lambdaOT * loss_dict['OT']:.4f} | "
-              f"mGAN: {self.lambdamGAN * loss_dict['mGAN']:.4f} | "
-              f"bGAN: {self.lambdabGAN * loss_dict['bGAN']:.4f}")
+        print(
+            f"Step {step} | "
+            f"AE: {self.lambdaAE * loss_dict['AE']:.4f} | "
+            f"LA: {self.lambdaLA * loss_dict['LA']:.4f} | "
+            f"OT: {self.lambdaOT * loss_dict['OT']:.4f} | "
+            f"mGAN: {loss_dict['mGAN']:.4f} | "
+            f"bGAN: {loss_dict['bGAN']:.4f}|"
+            f"SWD: {loss_dict['SWD']:.4f}"
+        )
