@@ -47,6 +47,7 @@ def batch_scale(adata: AnnData, method: str = 'maxabs') -> None:
             idx = np.arange(adata.n_obs)
         else:
             idx = np.where(adata.obs['batch'] == b)[0]
+
         X_batch = adata.X[idx]
 
         if issparse(X_batch):
@@ -71,55 +72,37 @@ def batch_scale(adata: AnnData, method: str = 'maxabs') -> None:
 def build_mnn_prior(Sim: torch.Tensor, k: int, prior: float = 2.0) -> torch.Tensor:
     row_mask = torch.zeros_like(Sim, dtype=torch.bool)
     col_mask = torch.zeros_like(Sim, dtype=torch.bool)
+
     row_mask.scatter_(1, Sim.topk(k, dim=1, largest=False).indices, True)
     col_mask.scatter_(0, Sim.topk(k, dim=0, largest=False).indices, True)
+
     mnn_mask = row_mask & col_mask
+
     return torch.where(mnn_mask, 1.0 / prior, prior)
 
 
-def build_celltype_prior(
-    list1: list[str],
-    list2: list[str],
-    prior: float = 2.0
-) -> torch.Tensor:
+def build_celltype_prior(list1: list[str], list2: list[str], prior: float = 2.0) -> torch.Tensor:
     arr1 = np.array(list1)
     arr2 = np.array(list2)
     is_same = arr1[:, None] == arr2
     is_same_tensor = torch.from_numpy(is_same)
+
     return torch.where(is_same_tensor, 1.0 / prior, prior)
 
 
-def pairwise_correlation_distance(
-    X: torch.Tensor,
-    Y: Optional[torch.Tensor] = None
-) -> torch.Tensor:
+def pairwise_correlation_distance(X: torch.Tensor, Y: Optional[torch.Tensor] = None) -> torch.Tensor:
     if Y is None:
         Y = X
+
     X_centered = X - X.mean(dim=1, keepdim=True)
     Y_centered = Y - Y.mean(dim=1, keepdim=True)
+
     cov = X_centered @ Y_centered.T
+
     std_X = torch.norm(X_centered, p=2, dim=1)
     std_Y = torch.norm(Y_centered, p=2, dim=1)
     std_prod = std_X.unsqueeze(1) * std_Y.unsqueeze(0)
+
     corr = cov / (std_prod + 1e-8)
+
     return 1 - corr
-
-
-def bernoulli_kl(
-    p: torch.Tensor,
-    q: torch.Tensor,
-    eps: float = 1e-8
-) -> torch.Tensor:
-    p = p.clamp(min=eps, max=1 - eps)
-    q = q.clamp(min=eps, max=1 - eps)
-    return p * torch.log(p / q) + (1 - p) * torch.log((1 - p) / (1 - q))
-
-
-def bernoulli_sym_kl(
-    p: torch.Tensor,
-    q: torch.Tensor,
-    eps: float = 1e-8
-) -> torch.Tensor:
-    kl_pq = bernoulli_kl(p, q, eps)
-    kl_qp = bernoulli_kl(q, p, eps)
-    return 0.5 * (kl_pq + kl_qp).mean(dim=1).mean()
