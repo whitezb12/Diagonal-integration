@@ -43,10 +43,12 @@ class Encoder(nn.Module):
         use_prefix: bool = False,
         use_domain_bn: bool = False,
         dropout_rate: float = 0.2,
+        loss_type: str = 'MSE' 
     ) -> None:
         super().__init__()
         self.use_prefix = use_prefix
         self.use_domain_bn = use_domain_bn
+        self.loss_type = loss_type
 
         n_hidden = 512
         input_dim = n_input + 2 if use_prefix else n_input
@@ -60,7 +62,11 @@ class Encoder(nn.Module):
             self.bn_A = nn.BatchNorm1d(n_hidden)
             self.bn_B = nn.BatchNorm1d(n_hidden)
 
-    def forward(self, x: torch.Tensor, domain: Optional[Literal['A', 'B']] = None) -> torch.Tensor:
+    def forward(
+        self, 
+        x: torch.Tensor, 
+        domain: Optional[Literal['A', 'B']] = None
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         h = self.fc1(x)
 
         if self.use_domain_bn:
@@ -80,7 +86,8 @@ class Encoder(nn.Module):
         eps = torch.randn_like(std)
         z = mu + eps * std
 
-        return z
+        return z, mu, logvar
+
 
 
 class Generator(nn.Module):
