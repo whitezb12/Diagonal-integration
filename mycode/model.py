@@ -19,7 +19,7 @@ class Model(object):
         training_steps: int = 10000,
         seed: int = 1234,
         n_latent: int = 16,
-        lambdaAE: float = 10.0,
+        lambdaRecon: float = 10.0,
         lambdaLA: float = 10.0,
         lambdaOT: float = 1.0,
         lambdamGAN: float = 1.0,
@@ -45,7 +45,7 @@ class Model(object):
         self.batch_size = batch_size
         self.training_steps = training_steps
         self.n_latent = n_latent
-        self.lambdaAE = lambdaAE
+        self.lambdaRecon = lambdaRecon
         self.lambdaOT = lambdaOT
         self.lambdaLA = lambdaLA
         self.lambdamGAN = lambdamGAN
@@ -76,14 +76,14 @@ class Model(object):
             x_A = batch_A['expression'].float().to(self.device)
             x_B = batch_B['expression'].float().to(self.device)
 
-            z_A = self.E_A(x_A)
-            z_B = self.E_B(x_B)
+            z_A, mu_A, logvar_A = self.E_A(x_A)
+            z_B, mu_B, logvar_B = self.E_B(x_B)
 
             x_AtoB = self.G_B(z_A)
             x_BtoA = self.G_A(z_B)
 
-            z_AtoB = self.E_B(x_AtoB)
-            z_BtoA = self.E_A(x_BtoA)
+            z_AtoB, _, _ = self.E_B(x_AtoB)
+            z_BtoA, _, _ = self.E_A(x_BtoA)
 
             x_Arecon = self.G_A(z_A)
             x_Brecon = self.G_B(z_B)
@@ -96,7 +96,7 @@ class Model(object):
             self.optimizer_D.step()
 
             loss_dict = {
-                'AE': self.compute_ae_loss(x_A, x_Arecon) + self.compute_ae_loss(x_B, x_Brecon),
+                'VAE': self.compute_vae_loss(x_A, x_Arecon, mu_A, logvar_A) + self.compute_vae_loss(x_B, x_Brecon, mu_B, logvar_B),
                 'LA': self.compute_latent_align_loss(z_A, z_AtoB) + self.compute_latent_align_loss(z_B, z_BtoA),
                 'OT': self.compute_ot_loss(z_A, z_B, batch_A, batch_B),
                 'mGAN': self.compute_generator_loss_inter(z_A, z_B),
@@ -105,7 +105,7 @@ class Model(object):
             }
 
             total_loss = (
-                self.lambdaAE * loss_dict['AE']
+                self.lambdaRecon * loss_dict['VAE']
                 + self.lambdaLA * loss_dict['LA']
                 + self.lambdaOT * loss_dict['OT']
                 + self.lambdamGAN * loss_dict['mGAN']
@@ -133,8 +133,8 @@ class Model(object):
         x_B = torch.stack([self.dataset_B[i]['expression'] for i in range(len(self.dataset_B))]).float().to(self.device)
 
         with torch.no_grad():
-            z_A = self.E_A(x_A)
-            z_B = self.E_B(x_B)
+            z_A, _, _ = self.E_A(x_A)
+            z_B, _, _ = self.E_B(x_B)
 
         self.latent = np.concatenate((z_A.cpu().numpy(), z_B.cpu().numpy()), axis=0)
 
@@ -144,13 +144,16 @@ class Model(object):
         print(f"Processed {len(x_A) + len(x_B)} samples")
         print(f"Latent space shape: {self.latent.shape}")
 
-    def compute_ae_loss(self, x: torch.Tensor, x_recon: torch.Tensor) -> torch.Tensor:
+    def compute_vae_loss(self, x: torch.Tensor, x_recon: torch.Tensor, mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
         if self.loss_type == 'MSE':
-            return F.mse_loss(x, x_recon)
+            recon_loss = F.mse_loss(x_recon, x, reduction='mean')
         elif self.loss_type == 'BCE':
-            return F.binary_cross_entropy(x_recon, x)
+            recon_loss = F.binary_cross_entropy(x_recon, x, reduction='mean')
         else:
             raise ValueError(f"Unsupported loss type: {self.loss_type}")
+            
+        kl_div = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
+        return recon_loss + 0.01*kl_div
 
     def compute_latent_align_loss(self, z: torch.Tensor, z_to: torch.Tensor) -> torch.Tensor:
         return F.mse_loss(z, z_to)
@@ -288,7 +291,7 @@ class Model(object):
     def log(self, step: int, loss_dict: Dict[str, torch.Tensor]) -> None:
         print(
             f"Step {step} | "
-            f"AE: {self.lambdaAE * loss_dict['AE']:.4f} | "
+            f"Recon: {self.lambdaRecon * loss_dict['VAE']:.4f} | "
             f"LA: {self.lambdaLA * loss_dict['LA']:.4f} | "
             f"OT: {self.lambdaOT * loss_dict['OT']:.4f} | "
             f"mGAN: {loss_dict['mGAN']:.4f} | "
