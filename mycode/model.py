@@ -29,7 +29,6 @@ class Model(object):
         mode: str = 'weak',
         use_prior: bool = False,
         alpha: float = 2,
-        mass: float = 0.95,
         celltype_col: Optional[str] = None,
         source_col: Optional[str] = None,
         loss_type: Literal['MSE', 'BCE'] = 'MSE',
@@ -54,7 +53,6 @@ class Model(object):
         self.n_KNN = n_KNN
         self.mode = mode
         self.use_prior = use_prior
-        self.mass = mass
         self.alpha = alpha
         self.loss_type = loss_type
 
