@@ -23,7 +23,7 @@ class Model(object):
         lambdaOT: float = 1.0,
         lambdamGAN: float = 1.0,
         lambdabGAN: float = 1.0,
-        lambdaGeo: float = 1.0,
+        lambdaGeo: float = 0.1,
         n_KNN: int = 3,
         mode: str = 'weak',
         use_prior: bool = False,
@@ -84,7 +84,7 @@ class Model(object):
 
             x_Arecon = self.G_A(z_A)
             x_Brecon = self.G_B(z_B)
-
+            
             self.optimizer_D.zero_grad()
             loss_D_m = self.compute_discriminator_loss_inter(z_A, z_B)
             loss_D_b = self.compute_discriminator_loss_intra(z_A, z_B, batch_A, batch_B)
@@ -121,7 +121,7 @@ class Model(object):
                 prior_matrix = build_mnn_prior(c_cross, self.n_KNN, prior=self.alpha).to(self.device)
             T = unbalanced_ot(cost_pp=c_cross, prior=prior_matrix, device=self.device)
             z_dist = torch.mean((z_A.view(self.batch_size, 1, -1) - z_B.view(1, self.batch_size, -1))**2, dim=2)
-            loss_dict['OT'] = torch.sum(T * z_dist) / torch.sum(T)
+            loss_dict['OT'] = torch.sum(T * z_dist) / torch.sum(T) + self.sliced_wasserstein_distance(z_A, z_B)
 
             #Geo loss
             loss_dict['Geo'] = self.compute_geo_loss(z_A, z_B, T, k=10)
@@ -207,6 +207,15 @@ class Model(object):
         loss_B = torch.sum(z_dist_B * W_B) / torch.sum(W_B)
         return (loss_A + loss_B) / 2
 
+    def sliced_wasserstein_distance(self, z_A: torch.Tensor, z_B: torch.Tensor, num_projections: int = 50, p: int = 2) -> torch.Tensor:
+        projections = torch.randn((num_projections, self.n_latent), device=self.device)
+        projections = projections / torch.norm(projections, dim=1, keepdim=True)
+        proj_A = z_A @ projections.T
+        proj_B = z_B @ projections.T
+        proj_A_sorted, _ = torch.sort(proj_A, dim=0)
+        proj_B_sorted, _ = torch.sort(proj_B, dim=0)
+        distances = (proj_A_sorted - proj_B_sorted).abs().pow(p).mean(dim=0)
+        return distances.mean().pow(1 / p)
 
     def _init_models_and_optimizers(self) -> None:
         if self.mode == 'strong':
@@ -294,8 +303,3 @@ class Model(object):
             f"mGAN: {loss_dict['mGAN']:.4f} | "
             f"bGAN: {loss_dict['bGAN']:.4f}"
         )
-
-
-
-
-
