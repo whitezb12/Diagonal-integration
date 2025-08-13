@@ -69,7 +69,6 @@ class Model(object):
         print("Training started at:", time.asctime())
 
         for step in range(self.training_steps):
-            cos = nn.CosineSimilarity(dim=1, eps=1e-6)
             batch_A, batch_B = next(iterator_A), next(iterator_B)
             x_A = batch_A['expression'].float().to(self.device)
             x_B = batch_B['expression'].float().to(self.device)
@@ -110,17 +109,17 @@ class Model(object):
 
             #OT loss
             if 'link_feat' in batch_A and 'link_feat' in batch_B and self.mode == 'weak':
-                c_cross = pairwise_correlation_distance(batch_A['link_feat'], batch_B['link_feat'])
+                c_cross = pairwise_correlation_distance(batch_A['link_feat'], batch_B['link_feat']).to(self.device)
             elif self.mode == 'strong':
                 c_cross = (pairwise_correlation_distance(z_A.detach(), z_BtoA.detach()) + pairwise_correlation_distance(z_B.detach(), z_AtoB.detach()))/2
             else:
                 raise ValueError("Invalid mode for distance computation")
 
             if 'celltype' in batch_A and 'celltype' in batch_B and self.use_prior:
-                prior_matrix = build_celltype_prior(batch_A['celltype'], batch_B['celltype'], prior=self.alpha)
+                prior_matrix = build_celltype_prior(batch_A['celltype'], batch_B['celltype'], prior=self.alpha).to(self.device)
             else:
-                prior_matrix = build_mnn_prior(c_cross, self.n_KNN, prior=self.alpha)
-            T = unbalanced_ot(cost_pp=c_cross, prior=prior_matrix).to(self.device)
+                prior_matrix = build_mnn_prior(c_cross, self.n_KNN, prior=self.alpha).to(self.device)
+            T = unbalanced_ot(cost_pp=c_cross, prior=prior_matrix, device=self.device)
             z_dist = torch.mean((z_A.view(self.batch_size, 1, -1) - z_B.view(1, self.batch_size, -1))**2, dim=2)
             loss_dict['OT'] = torch.sum(T * z_dist) / torch.sum(T)
 
