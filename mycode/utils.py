@@ -1,6 +1,6 @@
 import numpy as np
 import torch
-from typing import Optional
+from typing import Optional, List, Dict
 from anndata import AnnData
 from sklearn.preprocessing import MaxAbsScaler, StandardScaler
 from scipy.sparse import issparse, csc_matrix, csr_matrix
@@ -72,37 +72,71 @@ def batch_scale(adata: AnnData, method: str = 'maxabs') -> None:
 def build_mnn_prior(Sim: torch.Tensor, k: int, prior: float = 2.0) -> torch.Tensor:
     row_mask = torch.zeros_like(Sim, dtype=torch.bool)
     col_mask = torch.zeros_like(Sim, dtype=torch.bool)
-
     row_mask.scatter_(1, Sim.topk(k, dim=1, largest=False).indices, True)
     col_mask.scatter_(0, Sim.topk(k, dim=0, largest=False).indices, True)
-
     mnn_mask = row_mask & col_mask
-
     return torch.where(mnn_mask, 1.0 / prior, prior)
 
 
-def build_celltype_prior(list1: list[str], list2: list[str], prior: float = 2.0) -> torch.Tensor:
+def build_celltype_prior(list1: List[str], list2: List[str], prior: float = 2.0) -> torch.Tensor:
     arr1 = np.array(list1)
     arr2 = np.array(list2)
-    is_same = arr1[:, None] == arr2
-    is_same_tensor = torch.from_numpy(is_same)
-
+    is_same_tensor = torch.from_numpy(arr1[:, None] == arr2)
     return torch.where(is_same_tensor, 1.0 / prior, prior)
 
 
 def pairwise_correlation_distance(X: torch.Tensor, Y: Optional[torch.Tensor] = None) -> torch.Tensor:
     if Y is None:
         Y = X
-
     X_centered = X - X.mean(dim=1, keepdim=True)
     Y_centered = Y - Y.mean(dim=1, keepdim=True)
-
     cov = X_centered @ Y_centered.T
-
     std_X = torch.norm(X_centered, p=2, dim=1)
     std_Y = torch.norm(Y_centered, p=2, dim=1)
-    std_prod = std_X.unsqueeze(1) * std_Y.unsqueeze(0)
-
-    corr = cov / (std_prod + 1e-8)
-
+    corr = cov / (std_X.unsqueeze(1) * std_Y.unsqueeze(0) + 1e-8)
     return 1 - corr
+
+
+def unbalanced_ot(cost_pp: torch.Tensor, 
+                  reg: float = 0.05, 
+                  reg_m: float = 0.5, 
+                  prior: Optional[torch.Tensor] = None, 
+                  device: str = 'cpu', 
+                  max_iteration: Dict[str, int] = {'outer': 10, 'inner': 5}) -> Optional[torch.Tensor]:
+    outer_iter = max_iteration['outer']
+    inner_iter = max_iteration['inner']
+    ns, nt = cost_pp.shape
+    if prior is not None:
+        cost_pp = cost_pp * prior
+    p_s = torch.ones(ns, 1, device=device) / ns   
+    p_t = torch.ones(nt, 1, device=device) / nt
+    tran = torch.ones(ns, nt, device=device) / (ns * nt)
+    dual = torch.ones(ns, 1, device=device) / ns
+    f = reg_m / (reg_m + reg)
+    for _ in range(outer_iter):
+        cost = cost_pp
+        kernel = torch.exp(-cost / (reg * torch.max(torch.abs(cost)))) * tran
+        b = p_t / (torch.t(kernel) @ dual)
+        for _ in range(inner_iter):
+            dual = (p_s / (kernel @ b))**f
+            b = (p_t / (torch.t(kernel) @ dual))**f
+        tran = (dual @ torch.t(b)) * kernel
+    out = tran.detach()
+    if torch.isnan(out).sum() > 0:
+        return None
+    return out
+
+
+def Graph_topk(X: torch.Tensor, nearest_neighbor: int = 10, t: float = 1.0) -> torch.Tensor:
+    XX = X.detach()
+    D = pairwise_correlation_distance(XX)
+    values, _ = torch.topk(D, nearest_neighbor + 1, dim=1, largest=False)
+    radius = values[:, nearest_neighbor].view(-1, 1)
+    W = torch.where(D <= radius, D, torch.zeros_like(D))
+    W = torch.max(W, W.T)
+    pos = W > 0
+    W_mean = W[pos].mean()
+    W[pos] = torch.exp(-W[pos] / (t * W_mean))
+    return W.detach()
+
+
