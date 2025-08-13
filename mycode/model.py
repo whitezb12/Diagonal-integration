@@ -3,6 +3,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 import torch.optim as optim
+import ot
 from mycode.dataloader import *
 from mycode.utils import *
 from mycode.network import *
@@ -24,7 +25,7 @@ class Model(object):
         lambdamGAN: float = 1.0,
         lambdabGAN: float = 1.0,
         lambdaGeo: float = 0.1,
-        n_KNN: int = 3,
+        n_KNN: int = 30,
         mode: str = 'weak',
         use_prior: bool = False,
         alpha: float = 2,
@@ -45,10 +46,10 @@ class Model(object):
         self.n_latent = n_latent
         self.lambdaRecon = lambdaRecon
         self.lambdaOT = lambdaOT
-        self.lambdaGeo = lambdaGeo
         self.lambdaLA = lambdaLA
         self.lambdamGAN = lambdamGAN
         self.lambdabGAN = lambdabGAN
+        self.lambdaGeo = lambdaGeo
         self.n_KNN = n_KNN
         self.mode = mode
         self.use_prior = use_prior
@@ -84,7 +85,7 @@ class Model(object):
 
             x_Arecon = self.G_A(z_A)
             x_Brecon = self.G_B(z_B)
-            
+
             self.optimizer_D.zero_grad()
             loss_D_m = self.compute_discriminator_loss_inter(z_A, z_B)
             loss_D_b = self.compute_discriminator_loss_intra(z_A, z_B, batch_A, batch_B)
@@ -93,49 +94,17 @@ class Model(object):
             self.optimizer_D.step()
 
             loss_dict = {}
-            #VAE loss
-            if self.loss_type == 'MSE':
-                recon_loss = F.mse_loss(x_A, x_Arecon, reduction='mean') + F.mse_loss(x_B, x_Brecon, reduction='mean')
-            elif self.loss_type == 'BCE':
-                recon_loss = F.binary_cross_entropy(x_A, x_Arecon, reduction='mean') + F.binary_cross_entropy(x_B, x_Brecon, reduction='mean')
-            else:
-                raise ValueError(f"Unsupported loss type: {self.loss_type}")
-                
-            kl_div = -0.5 * (torch.mean(1 + logvar_A - mu_A.pow(2) - logvar_A.exp()) + torch.mean(1 + logvar_B - mu_B.pow(2) - logvar_B.exp()))
-            loss_dict['VAE'] = recon_loss + 0.01*kl_div
-
-            #LA loss
-            loss_dict['LA'] = F.mse_loss(z_A, z_AtoB) + F.mse_loss(z_B, z_BtoA)
-
-            #OT loss
-            if 'link_feat' in batch_A and 'link_feat' in batch_B and self.mode == 'weak':
-                c_cross = pairwise_correlation_distance(batch_A['link_feat'], batch_B['link_feat']).to(self.device)
-            elif self.mode == 'strong':
-                c_cross = (pairwise_correlation_distance(z_A.detach(), z_BtoA.detach()) + pairwise_correlation_distance(z_B.detach(), z_AtoB.detach()))/2
-            else:
-                raise ValueError("Invalid mode for distance computation")
-
-            if 'celltype' in batch_A and 'celltype' in batch_B and self.use_prior:
-                prior_matrix = build_celltype_prior(batch_A['celltype'], batch_B['celltype'], prior=self.alpha).to(self.device)
-            else:
-                prior_matrix = build_mnn_prior(c_cross, self.n_KNN, prior=self.alpha).to(self.device)
-            T = unbalanced_ot(cost_pp=c_cross, prior=prior_matrix, device=self.device)
-            z_dist = torch.mean((z_A.view(self.batch_size, 1, -1) - z_B.view(1, self.batch_size, -1))**2, dim=2)
-            loss_dict['OT'] = torch.sum(T * z_dist) / torch.sum(T) + self.sliced_wasserstein_distance(z_A, z_B)
-
-            #Geo loss
-            loss_dict['Geo'] = self.compute_geo_loss(z_A, z_B, T, k=10)
-
-            #Modality GAN
+            loss_dict['VAE'] = self.compute_vae_loss(x_A, x_Arecon, mu_A, logvar_A) + self.compute_vae_loss(x_B, x_Brecon, mu_B, logvar_B)
+            loss_dict['LA'] = self.compute_latent_align_loss(z_A, z_AtoB) + self.compute_latent_align_loss(z_B, z_BtoA)
+            loss_dict['OT'], T = self.compute_ot_loss(z_A, z_B, z_AtoB, z_BtoA, batch_A, batch_B)
+            loss_dict['Geo'] = self.compute_geo_loss(z_A, z_B, T)
             loss_dict['mGAN'] = self.compute_generator_loss_inter(z_A, z_B)
-
-            #Batch GAN
             loss_dict['bGAN'] = self.compute_generator_loss_intra(z_A, z_B, batch_A, batch_B)
-
             total_loss = (
                 self.lambdaRecon * loss_dict['VAE']
                 + self.lambdaLA * loss_dict['LA']
                 + self.lambdaOT * loss_dict['OT']
+                + self.lambdaGeo * loss_dict['Geo']
                 + self.lambdamGAN * loss_dict['mGAN']
                 + self.lambdabGAN * loss_dict['bGAN']
             )
@@ -171,6 +140,19 @@ class Model(object):
         print(f"Processed {len(x_A) + len(x_B)} samples")
         print(f"Latent space shape: {self.latent.shape}")
 
+    def compute_vae_loss(self, x: torch.Tensor, x_recon: torch.Tensor, mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
+        if self.loss_type == 'MSE':
+            recon_loss = F.mse_loss(x_recon, x, reduction='mean')
+        elif self.loss_type == 'BCE':
+            recon_loss = F.binary_cross_entropy(x_recon, x, reduction='mean')
+        else:
+            raise ValueError(f"Unsupported loss type: {self.loss_type}")
+            
+        kl_div = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
+        return recon_loss + 0.01*kl_div
+
+    def compute_latent_align_loss(self, z: torch.Tensor, z_to: torch.Tensor) -> torch.Tensor:
+        return F.mse_loss(z, z_to)
 
     def compute_discriminator_loss_inter(self, z_A: torch.Tensor, z_B: torch.Tensor) -> torch.Tensor:
         return F.softplus(-self.D_Z(z_A.detach())).mean() + F.softplus(self.D_Z(z_B.detach())).mean()
@@ -193,6 +175,24 @@ class Model(object):
         if self.D_B:
             loss += -F.cross_entropy(self.D_B(z_B), batch_B['source'].to(self.device))
         return loss
+
+    def compute_ot_loss(self, z_A: torch.Tensor, z_B: torch.Tensor, z_AtoB: torch.Tensor, z_BtoA: torch.Tensor, batch_A: dict, batch_B: dict) -> torch.Tensor:
+        if 'link_feat' in batch_A and 'link_feat' in batch_B and self.mode == 'weak':
+            c_cross = pairwise_correlation_distance(batch_A['link_feat'], batch_B['link_feat']).to(self.device)
+        elif self.mode == 'strong':
+            c_cross =  (pairwise_correlation_distance(z_A.detach(), z_BtoA.detach()) + pairwise_correlation_distance(z_B.detach(), z_AtoB.detach()))/2
+        else:
+            raise ValueError("Invalid mode for distance computation")
+
+        if 'celltype' in batch_A and 'celltype' in batch_B and self.use_prior:
+            prior_matrix = build_celltype_prior(batch_A['celltype'], batch_B['celltype'], prior=self.alpha).to(self.device)
+        else:
+            prior_matrix = build_mnn_prior(c_cross, self.n_KNN, prior=self.alpha)
+
+        T = unbalanced_ot(cost_pp=c_cross, prior=prior_matrix, reg=0.05, reg_m=0.5, device=self.device)
+        z_dist = torch.cdist(z_A, z_B, p=2).pow(2)
+        ot_loss = torch.sum(T * z_dist) / torch.sum(T) + self.sliced_wasserstein_distance(z_A, z_B)
+        return ot_loss, T
     
     def compute_geo_loss(self, z_A: torch.Tensor, z_B: torch.Tensor, T: torch.Tensor, k: int = 10) -> torch.Tensor:
         T_ab = T / (T.sum(dim=1, keepdim=True) + 1e-12)
@@ -206,7 +206,7 @@ class Model(object):
         z_dist_B = torch.cdist(z_B_mapped, z_B_mapped, p=2).pow(2)
         loss_B = torch.sum(z_dist_B * W_B) / torch.sum(W_B)
         return (loss_A + loss_B) / 2
-
+    
     def sliced_wasserstein_distance(self, z_A: torch.Tensor, z_B: torch.Tensor, num_projections: int = 50, p: int = 2) -> torch.Tensor:
         projections = torch.randn((num_projections, self.n_latent), device=self.device)
         projections = projections / torch.norm(projections, dim=1, keepdim=True)
@@ -299,7 +299,7 @@ class Model(object):
             f"Recon: {self.lambdaRecon * loss_dict['VAE']:.4f} | "
             f"LA: {self.lambdaLA * loss_dict['LA']:.4f} | "
             f"OT: {self.lambdaOT * loss_dict['OT']:.4f} | "
-            f"Geo: {self.lambdaGeo * loss_dict['Geo']:.4f} | "
+            f"Geo: {loss_dict['Geo']:.4f} | " 
             f"mGAN: {loss_dict['mGAN']:.4f} | "
             f"bGAN: {loss_dict['bGAN']:.4f}"
         )
