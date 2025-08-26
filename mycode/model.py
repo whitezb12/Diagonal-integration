@@ -85,11 +85,15 @@ class Model(object):
             x_Arecon = self.G_A(z_A)
             x_Brecon = self.G_B(z_B)
 
-            self.optimizer_D.zero_grad()
-            loss_D_m = self.compute_discriminator_loss_inter(z_A, z_B)
-            loss_D_b = self.compute_discriminator_loss_intra(z_A, z_B, batch_A, batch_B)
-            loss_D = self.lambdamGAN * loss_D_m + self.lambdabGAN * loss_D_b
-            loss_D.backward()
+            for _ in range(3): 
+                self.optimizer_D.zero_grad() 
+                loss_D_m = self.compute_discriminator_loss_inter(z_A.detach(), z_B.detach()) 
+                loss_D_m.backward(retain_graph=True)  
+                self.optimizer_D.step()  
+
+            self.optimizer_D.zero_grad() 
+            loss_D_b = self.compute_discriminator_loss_intra(z_A.detach(), z_B.detach(), batch_A, batch_B) 
+            loss_D_b.backward() 
             self.optimizer_D.step()
 
             loss_dict = {}
@@ -97,8 +101,8 @@ class Model(object):
             loss_dict['LA'] = self.compute_latent_align_loss(z_A, z_AtoB) + self.compute_latent_align_loss(z_B, z_BtoA)
             loss_dict['OT'], T = self.compute_ot_loss(z_A, z_B, z_AtoB, z_BtoA, batch_A, batch_B)
             loss_dict['Geo'] = self.compute_geo_loss(z_A, z_B, T)
-            loss_dict['mGAN'] = self.compute_generator_loss_inter(z_A, z_B)
-            loss_dict['bGAN'] = self.compute_generator_loss_intra(z_A, z_B, batch_A, batch_B)
+            loss_dict['mGAN'] = -self.compute_discriminator_loss_inter(z_A, z_B)
+            loss_dict['bGAN'] = -self.compute_discriminator_loss_intra(z_A, z_B, batch_A, batch_B)
             total_loss = (
                 self.lambdaRecon * loss_dict['VAE']
                 + self.lambdaLA * loss_dict['LA']
@@ -154,26 +158,18 @@ class Model(object):
         return F.mse_loss(z, z_to)
 
     def compute_discriminator_loss_inter(self, z_A: torch.Tensor, z_B: torch.Tensor) -> torch.Tensor:
-        return F.softplus(-self.D_Z(z_A.detach())).mean() + F.softplus(self.D_Z(z_B.detach())).mean()
+        return F.softplus(-self.D_Z(z_A)).mean() + F.softplus(self.D_Z(z_B)).mean()
 
-    def compute_discriminator_loss_intra(self, z_A: torch.Tensor, z_B: torch.Tensor, batch_A: dict, batch_B: dict) -> torch.Tensor:
-        loss = 0.0
+    def compute_discriminator_loss_intra(self, z_A, z_B, batch_A, batch_B):
+        losses = []
         if self.D_A:
-            loss += F.cross_entropy(self.D_A(z_A.detach()), batch_A['source'].to(self.device))
+            losses.append(F.cross_entropy(self.D_A(z_A), batch_A['source'].to(self.device)))
         if self.D_B:
-            loss += F.cross_entropy(self.D_B(z_B.detach()), batch_B['source'].to(self.device))
-        return loss
+            losses.append(F.cross_entropy(self.D_B(z_B), batch_B['source'].to(self.device)))
+        if len(losses) == 0:
+            return torch.tensor(0.0, device=self.device, requires_grad=True)
+        return sum(losses)
 
-    def compute_generator_loss_inter(self, z_A: torch.Tensor, z_B: torch.Tensor) -> torch.Tensor:
-        return -(F.softplus(-self.D_Z(z_A)) + F.softplus(self.D_Z(z_B))).mean()
-
-    def compute_generator_loss_intra(self, z_A: torch.Tensor, z_B: torch.Tensor, batch_A: dict, batch_B: dict) -> torch.Tensor:
-        loss = 0.0
-        if self.D_A:
-            loss += -F.cross_entropy(self.D_A(z_A), batch_A['source'].to(self.device))
-        if self.D_B:
-            loss += -F.cross_entropy(self.D_B(z_B), batch_B['source'].to(self.device))
-        return loss
 
     def compute_ot_loss(self, z_A: torch.Tensor, z_B: torch.Tensor, z_AtoB: torch.Tensor, z_BtoA: torch.Tensor, batch_A: dict, batch_B: dict) -> torch.Tensor:
         if 'link_feat' in batch_A and 'link_feat' in batch_B and self.mode == 'weak':
@@ -190,7 +186,7 @@ class Model(object):
 
         T = unbalanced_ot(cost_pp=c_cross, prior=prior_matrix, reg=0.05, reg_m=0.5, device=self.device)
         z_dist = torch.cdist(z_A, z_B, p=2).pow(2)
-        ot_loss = torch.sum(T * z_dist) / torch.sum(T) + self.sliced_wasserstein_distance(z_A, z_B)
+        ot_loss = torch.sum(T * z_dist) / torch.sum(T)
         return ot_loss, T
     
     def compute_geo_loss(self, z_A: torch.Tensor, z_B: torch.Tensor, T: torch.Tensor, k: int = 10) -> torch.Tensor:
@@ -206,23 +202,14 @@ class Model(object):
         loss_B = torch.sum(z_dist_B * W_B) / torch.sum(W_B)
         return (loss_A + loss_B) / 2
     
-    def sliced_wasserstein_distance(self, z_A: torch.Tensor, z_B: torch.Tensor, num_projections: int = 50, p: int = 2) -> torch.Tensor:
-        projections = torch.randn((num_projections, self.n_latent), device=self.device)
-        projections = projections / torch.norm(projections, dim=1, keepdim=True)
-        proj_A = z_A @ projections.T
-        proj_B = z_B @ projections.T
-        proj_A_sorted, _ = torch.sort(proj_A, dim=0)
-        proj_B_sorted, _ = torch.sort(proj_B, dim=0)
-        distances = (proj_A_sorted - proj_B_sorted).abs().pow(p).mean(dim=0)
-        return distances.mean().pow(1 / p)
 
     def _init_models_and_optimizers(self) -> None:
         if self.mode == 'strong':
             self.shared_encoder = Encoder(
-                self.dataset_A.feature_shapes['expression'], self.n_latent, use_prefix=True, use_domain_bn=True
+                self.dataset_A.feature_shapes['expression'], self.n_latent, use_prefix=False, use_domain_bn=True
             ).to(self.device)
-            self.E_A = DomainWrapper(self.shared_encoder, domain='A', use_prefix=True, use_domain_bn=True)
-            self.E_B = DomainWrapper(self.shared_encoder, domain='B', use_prefix=True, use_domain_bn=True)
+            self.E_A = DomainWrapper(self.shared_encoder, domain='A', use_prefix=False, use_domain_bn=True)
+            self.E_B = DomainWrapper(self.shared_encoder, domain='B', use_prefix=False, use_domain_bn=True)
             self.shared_decoder = Generator(
                 self.dataset_A.feature_shapes['expression'],
                 self.n_latent,
