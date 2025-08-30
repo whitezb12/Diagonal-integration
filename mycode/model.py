@@ -23,7 +23,7 @@ class Model(object):
         lambdaOT: float = 1.0,
         lambdamGAN: float = 1.0,
         lambdabGAN: float = 1.0,
-        lambdaGeo: float = 0.1,
+        lambdaGeo: float = 0.05,
         n_KNN: int = 30,
         mode: str = 'weak',
         use_prior: bool = False,
@@ -85,21 +85,22 @@ class Model(object):
             x_Arecon = self.G_A(z_A)
             x_Brecon = self.G_B(z_B)
 
-            for _ in range(3): 
-                self.optimizer_D.zero_grad() 
+            for _ in range(3):
+                self.optimizer_D_m.zero_grad() 
                 loss_D_m = self.compute_discriminator_loss_inter(z_A.detach(), z_B.detach()) 
-                loss_D_m.backward(retain_graph=True)  
-                self.optimizer_D.step()  
+                loss_D_m.backward()  
+                self.optimizer_D_m.step()  
 
-            self.optimizer_D.zero_grad() 
-            loss_D_b = self.compute_discriminator_loss_intra(z_A.detach(), z_B.detach(), batch_A, batch_B) 
-            loss_D_b.backward() 
-            self.optimizer_D.step()
+            if self.optimizer_D_b:
+                self.optimizer_D_b.zero_grad() 
+                loss_D_b = self.compute_discriminator_loss_intra(z_A.detach(), z_B.detach(), batch_A, batch_B) 
+                loss_D_b.backward() 
+                self.optimizer_D_b.step()
 
             loss_dict = {}
             loss_dict['VAE'] = self.compute_vae_loss(x_A, x_Arecon, mu_A, logvar_A) + self.compute_vae_loss(x_B, x_Brecon, mu_B, logvar_B)
             loss_dict['LA'] = self.compute_latent_align_loss(z_A, z_AtoB) + self.compute_latent_align_loss(z_B, z_BtoA)
-            loss_dict['OT'], T = self.compute_ot_loss(z_A, z_B, z_AtoB, z_BtoA, batch_A, batch_B)
+            loss_dict['OT'], T = self.compute_ot_loss(z_A, z_B, batch_A, batch_B)
             loss_dict['Geo'] = self.compute_geo_loss(z_A, z_B, T)
             loss_dict['mGAN'] = -self.compute_discriminator_loss_inter(z_A, z_B)
             loss_dict['bGAN'] = -self.compute_discriminator_loss_intra(z_A, z_B, batch_A, batch_B)
@@ -117,7 +118,7 @@ class Model(object):
             torch.nn.utils.clip_grad_norm_(self.params_G, 5.0)
             self.optimizer_G.step()
 
-            if step % 100 == 0:
+            if step % 1000 == 0:
                 self.log(step, loss_dict)
 
         self.train_time = time.time() - begin_time
@@ -171,11 +172,11 @@ class Model(object):
         return sum(losses)
 
 
-    def compute_ot_loss(self, z_A: torch.Tensor, z_B: torch.Tensor, z_AtoB: torch.Tensor, z_BtoA: torch.Tensor, batch_A: dict, batch_B: dict) -> torch.Tensor:
+    def compute_ot_loss(self, z_A: torch.Tensor, z_B: torch.Tensor, batch_A: dict, batch_B: dict) -> torch.Tensor:
         if 'link_feat' in batch_A and 'link_feat' in batch_B and self.mode == 'weak':
             c_cross = pairwise_correlation_distance(batch_A['link_feat'], batch_B['link_feat']).to(self.device)
         elif self.mode == 'strong':
-            c_cross =  (pairwise_correlation_distance(z_A.detach(), z_BtoA.detach()) + pairwise_correlation_distance(z_B.detach(), z_AtoB.detach()))/2
+            c_cross = pairwise_euclidean_distance(z_A.detach(), z_B.detach())
         else:
             raise ValueError("Invalid mode for distance computation")
 
@@ -185,7 +186,7 @@ class Model(object):
             prior_matrix = build_mnn_prior(c_cross, self.n_KNN, prior=self.alpha)
 
         T = unbalanced_ot(cost_pp=c_cross, prior=prior_matrix, reg=0.05, reg_m=0.5, device=self.device)
-        z_dist = torch.cdist(z_A, z_B, p=2).pow(2)
+        z_dist = pairwise_euclidean_distance(z_A, z_B)
         ot_loss = torch.sum(T * z_dist) / torch.sum(T)
         return ot_loss, T
     
@@ -195,10 +196,10 @@ class Model(object):
         W_A = Graph_topk(z_A, nearest_neighbor=min(k, z_A.size(0)-1))
         W_B = Graph_topk(z_B, nearest_neighbor=min(k, z_B.size(0)-1))
         z_A_mapped = torch.matmul(T_ba, z_A)
-        z_dist_A = torch.cdist(z_A_mapped, z_A_mapped, p=2).pow(2)
+        z_dist_A = pairwise_euclidean_distance(z_A_mapped, z_A_mapped)
         loss_A = torch.sum(z_dist_A * W_A) / torch.sum(W_A)
         z_B_mapped = torch.matmul(T_ab, z_B)
-        z_dist_B = torch.cdist(z_B_mapped, z_B_mapped, p=2).pow(2)
+        z_dist_B = pairwise_euclidean_distance(z_B_mapped, z_B_mapped)
         loss_B = torch.sum(z_dist_B * W_B) / torch.sum(W_B)
         return (loss_A + loss_B) / 2
     
@@ -206,19 +207,21 @@ class Model(object):
     def _init_models_and_optimizers(self) -> None:
         if self.mode == 'strong':
             self.shared_encoder = Encoder(
-                self.dataset_A.feature_shapes['expression'], self.n_latent, use_prefix=False, use_domain_bn=True
+                self.dataset_A.feature_shapes['expression'], self.n_latent, use_prefix=True, use_domain_bn=True
             ).to(self.device)
-            self.E_A = DomainWrapper(self.shared_encoder, domain='A', use_prefix=False, use_domain_bn=True)
-            self.E_B = DomainWrapper(self.shared_encoder, domain='B', use_prefix=False, use_domain_bn=True)
+            self.E_A = DomainWrapper(self.shared_encoder, domain='A', use_prefix=True, use_domain_bn=True)
+            self.E_B = DomainWrapper(self.shared_encoder, domain='B', use_prefix=True, use_domain_bn=True)
+
             self.shared_decoder = Generator(
                 self.dataset_A.feature_shapes['expression'],
                 self.n_latent,
                 loss_type=self.loss_type,
                 use_prefix=True,
-                use_domain_bn=True,
+                use_domain_bn=True
             ).to(self.device)
             self.G_A = DomainWrapper(self.shared_decoder, domain='A', use_prefix=True, use_domain_bn=True)
             self.G_B = DomainWrapper(self.shared_decoder, domain='B', use_prefix=True, use_domain_bn=True)
+
             self.params_G = list(self.shared_encoder.parameters()) + list(self.shared_decoder.parameters())
         else:
             self.E_A = Encoder(
@@ -232,15 +235,16 @@ class Model(object):
                 self.n_latent,
                 loss_type=self.loss_type,
                 use_prefix=False,
-                use_domain_bn=False,
+                use_domain_bn=False
             ).to(self.device)
             self.G_B = Generator(
                 self.dataset_B.feature_shapes['expression'],
                 self.n_latent,
                 loss_type=self.loss_type,
                 use_prefix=False,
-                use_domain_bn=False,
+                use_domain_bn=False
             ).to(self.device)
+
             self.params_G = (
                 list(self.E_A.parameters())
                 + list(self.E_B.parameters())
@@ -248,9 +252,11 @@ class Model(object):
                 + list(self.G_B.parameters())
             )
 
-        self.optimizer_G = optim.AdamW(self.params_G, lr=0.001, weight_decay=0.0)
+        self.optimizer_G = optim.AdamW(self.params_G, lr=0.001, weight_decay=0.001)
 
         self.D_Z = BinaryDiscriminator(self.n_latent).to(self.device)
+        self.optimizer_D_m = optim.AdamW(self.D_Z.parameters(), lr=0.001, weight_decay=0.001)
+
         self.D_A = (
             MultiClassDiscriminator(self.n_latent, self.dataset_A.source_categories).to(self.device)
             if self.dataset_A.source_categories > 1
@@ -262,12 +268,17 @@ class Model(object):
             else None
         )
 
-        self.params_D = list(self.D_Z.parameters())
+        self.params_D_b = []
         if self.D_A:
-            self.params_D += list(self.D_A.parameters())
+            self.params_D_b += list(self.D_A.parameters())
         if self.D_B:
-            self.params_D += list(self.D_B.parameters())
-        self.optimizer_D = optim.AdamW(self.params_D, lr=0.001, weight_decay=0.0)
+            self.params_D_b += list(self.D_B.parameters())
+
+        self.optimizer_D_b = (
+            optim.AdamW(self.params_D_b, lr=0.001, weight_decay=0.001) if self.params_D_b else None
+        )
+
+
 
     def _set_train_mode(self) -> None:
         for model in [self.E_A, self.E_B, self.G_A, self.G_B, self.D_Z, self.D_A, self.D_B]:
