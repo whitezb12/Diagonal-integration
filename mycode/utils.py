@@ -96,6 +96,10 @@ def pairwise_correlation_distance(X: torch.Tensor, Y: Optional[torch.Tensor] = N
     corr = cov / (std_X.unsqueeze(1) * std_Y.unsqueeze(0) + 1e-8)
     return 1 - corr
 
+def pairwise_euclidean_distance(X: torch.Tensor, Y: Optional[torch.Tensor] = None) -> torch.Tensor:
+    if Y is None:
+        Y = X
+    return ((X[:, None, :] - Y[None, :, :]) ** 2).sum(dim=-1)
 
 def unbalanced_ot(cost_pp: torch.Tensor, 
                   reg: float = 0.05, 
@@ -138,5 +142,3 @@ def Graph_topk(X: torch.Tensor, nearest_neighbor: int = 10, t: float = 1.0) -> t
     W_mean = W[pos].mean()
     W[pos] = torch.exp(-W[pos] / (t * W_mean))
     return W.detach()
-
-
