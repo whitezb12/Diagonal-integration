@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.nn.utils import spectral_norm
 from typing import Optional, Literal
 
 
@@ -134,30 +135,40 @@ class Generator(nn.Module):
         return x
 
 
+
 class BinaryDiscriminator(nn.Module):
     def __init__(self, n_input: int) -> None:
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(n_input, 256),
-            nn.BatchNorm1d(256),
+            spectral_norm(nn.Linear(n_input, 128)),
+            nn.LayerNorm(128),
             nn.ReLU(),
-            nn.Linear(256, 1),
+            spectral_norm(nn.Linear(128, 128)),
+            nn.LayerNorm(128),
+            nn.ReLU(),
+            nn.Linear(128,1)                        
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         score = self.net(x)
-        return torch.clamp(score, min=-50.0, max=50.0)
+        return torch.clamp(score, min=-5.0, max=5.0)
+
+
 
 
 class MultiClassDiscriminator(nn.Module):
     def __init__(self, n_input: int, num_classes: int) -> None:
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(n_input, 256),
-            nn.LayerNorm(256),
+            spectral_norm(nn.Linear(n_input, 128)),
+            nn.LayerNorm(128),
             nn.ReLU(),
-            nn.Linear(256, num_classes),
+            spectral_norm(nn.Linear(128, 128)),
+            nn.LayerNorm(128),
+            nn.ReLU(),
+            nn.Linear(128, num_classes),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.net(x)
+        score = self.net(x)
+        return torch.clamp(score, min=-5.0, max=5.0)
