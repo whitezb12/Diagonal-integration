@@ -153,7 +153,7 @@ class Model:
                 prior_matrix = build_celltype_prior(batch_A['celltype'], batch_B['celltype']).to(self.device)
                 loss_dict['CLIP'] = generalized_clip_loss_stable_masked(z_A, z_B, prior_matrix)
             else:
-                loss_dict['CLIP'] = 0
+                loss_dict['CLIP'] = torch.tensor(0.0, device=self.device)
 
             # generator loss
             loss_dict['mGAN'] = -self.compute_discriminator_loss_inter(z_A, z_B)
@@ -336,6 +336,7 @@ class Model:
             f"loss_mGAN vs loss_mDis: {loss_dict['mGAN']:.4f} vs {loss_dict['mDis']:.4f} | "
             f"loss_bGAN vs loss_bDis: {loss_dict['bGAN']:.4f} vs {loss_dict['bDis']:.4f}"
         )
+
 
 
 
