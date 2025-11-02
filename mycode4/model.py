@@ -26,13 +26,14 @@ class Model:
         lambdabGAN: float = 1.0,
         lambdaGeo: float = 0.5,
         lambdaCLIP: float = 0.1,
-        mode: str = "weak",
+        mode: Literal["weak", "strong"] = "weak",
         use_prior: bool = False,
         celltype_col: Optional[str] = None,
         source_col: Optional[str] = None,
         loss_type: Literal["MSE", "BCE"] = "MSE",
-        link_feat_num: int = None,
+        link_feat_num: Optional[int] = None,
     ) -> None:
+
         self.device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
         torch.manual_seed(seed)
@@ -56,13 +57,14 @@ class Model:
         self.loss_type = loss_type
         self.celltype_col = celltype_col
         self.source_col = source_col
-        self.link_feat_num = link_feat_num
 
         self.dataset_A = AnnDataDataset(adata1, celltype_key=self.celltype_col, source_key=self.source_col)
         self.dataset_B = AnnDataDataset(adata2, celltype_key=self.celltype_col, source_key=self.source_col)
 
         self.dataloader_A = load_data(self.dataset_A, self.batch_size)
         self.dataloader_B = load_data(self.dataset_B, self.batch_size)
+
+        self.link_feat_num = self.dataset_A.feature_shapes["expression"] if link_feat_num is None else link_feat_num
 
     def train(self) -> None:
         self._init_models_and_optimizers()
