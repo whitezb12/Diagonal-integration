@@ -18,6 +18,7 @@ class ImputationModel:
         adata_B: "anndata.AnnData",
         input_key: List[Optional[str]] = ['X_pca', 'X_lsi'],
         output_layer: List[Optional[str]] = ['counts', 'counts'],
+        loss_type: List[Optional[str]] = ['l2', 'l2'],
         batch_size: int = 16,
         training_steps: int = 10000,
         seed: int = 1234,
@@ -59,6 +60,8 @@ class ImputationModel:
         self.dataloader_A = load_data(self.dataset_A, batch_size = self.batch_size, mode = "imputation")
         self.dataloader_B = load_data(self.dataset_B, batch_size = self.batch_size, mode = "imputation")
 
+        self.loss_type = loss_type
+
         self.model_path = model_path
         
 
@@ -76,8 +79,6 @@ class ImputationModel:
             x_B = batch_B['input'].float().to(self.device)
             y_A = batch_A['output'].float().to(self.device)
             y_B = batch_B['output'].float().to(self.device)
-            library_size_A = y_A.sum(dim=1, keepdim=True)
-            library_size_B = y_B.sum(dim=1, keepdim=True)
 
             z_A = self.E_A(x_A)
             z_B = self.E_B(x_B)
@@ -90,6 +91,9 @@ class ImputationModel:
 
             x_Arecon = self.G_A(z_A)
             x_Brecon = self.G_B(z_B)
+
+            y_Arecon = self.D_A(x_Arecon)
+            y_Brecon = self.D_B(x_Brecon)
 
             loss_dict = {}
 
@@ -104,17 +108,8 @@ class ImputationModel:
             loss_dict['LA'] = loss_LA_AtoB + loss_LA_BtoA
 
             # y reconstruction loss            
-            # pyA_scale, pyA_r = self.D_A(x_Arecon)
-            # pyB_scale, pyB_r = self.D_B(x_Brecon)
-            # pyA_rate = pyA_scale * library_size_A
-            # pyB_rate = pyB_scale * library_size_B
-            # loss_recony_A = -log_nb_positive(y_A, pyA_rate, pyA_r).mean() / y_A.shape[1]
-            # loss_recony_B = -log_nb_positive(y_B, pyB_rate, pyB_r).mean() / y_B.shape[1]
-            # loss_dict['Recon_y'] = loss_recony_A + loss_recony_B
-            y_Arecon = self.D_A(x_Arecon)
-            y_Brecon = self.D_B(x_Brecon)
-            loss_recony_A = torch.mean((y_Arecon - y_A)**2) 
-            loss_recony_B = torch.mean((y_Brecon - y_B)**2) 
+            loss_recony_A = self.compute_Recony(y_Arecon, y_A, loss_type=self.loss_type[0], dispersion=self.dispersion_A)
+            loss_recony_B = self.compute_Recony(y_Brecon, y_B, loss_type=self.loss_type[1], dispersion=self.dispersion_B)
             loss_dict['Recon_y'] = loss_recony_A + loss_recony_B
 
             total_loss = (
@@ -156,7 +151,7 @@ class ImputationModel:
         print(f"Latent space shape: {self.latent.shape}")
 
 
-    def get_imputation(self, library_size=10000) -> None:
+    def get_imputation(self, library_size: float = 1e4) -> None:
         self._set_eval_mode()
         begin_time = time.time()
         print(f"Started at: {time.asctime(time.localtime(begin_time))}")
@@ -167,16 +162,29 @@ class ImputationModel:
         with torch.no_grad():
             z_A = self.E_A(x_A)
             z_B = self.E_B(x_B)
+
             x_AtoB = self.G_B(z_A)
             x_BtoA = self.G_A(z_B)
-            # pyAtoB_scale, _ = self.D_B(x_AtoB)
-            # pyBtoA_scale, _ = self.D_A(x_BtoA)
-            # pyAtoB_rate = pyAtoB_scale * library_size
-            # pyBtoA_rate = pyBtoA_scale * library_size 
-            # self.imputed_AtoB = pyAtoB_rate.detach().cpu().numpy()
-            # self.imputed_BtoA = pyBtoA_rate.detach().cpu().numpy()
-            y_AtoB = self.D_B(x_AtoB)
-            y_BtoA = self.D_A(x_BtoA)
+
+            y_AtoB_logits = self.D_B(x_AtoB)
+            y_BtoA_logits = self.D_A(x_BtoA)
+
+            if self.loss_type[0] == 'nb':
+                y_BtoA_scale = F.softmax(y_BtoA_logits, dim=-1)
+                y_BtoA = y_BtoA_scale * library_size
+            elif self.loss_type[0] == 'bce':
+                y_BtoA = torch.sigmoid(y_BtoA_logits)
+            else:
+                y_BtoA = y_BtoA_logits
+            
+            if self.loss_type[1] == 'nb':
+                y_AtoB_scale = F.softmax(y_AtoB_logits, dim=-1)
+                y_AtoB = y_AtoB_scale * library_size
+            elif self.loss_type[1] == 'bce':
+                y_AtoB = torch.sigmoid(y_AtoB_logits)
+            else:
+                y_AtoB = y_AtoB_logits  
+
             self.imputed_AtoB = y_AtoB.detach().cpu().numpy()
             self.imputed_BtoA = y_BtoA.detach().cpu().numpy()
 
@@ -217,6 +225,16 @@ class ImputationModel:
             n_output=self.dataset_B.feature_shapes['output']
         ).to(self.device)
 
+        if self.loss_type[0] == 'nb':
+            self.dispersion_A = nn.Parameter(torch.rand(self.dataset_A.feature_shapes['output'], device=self.device))
+        else:
+            self.dispersion_A = None
+
+        if self.loss_type[1] == 'nb':
+            self.dispersion_B = nn.Parameter(torch.rand(self.dataset_B.feature_shapes['output'], device=self.device))
+        else:
+            self.dispersion_B = None
+
         ckpt_path = os.path.join(self.model_path, "ckpt.pth")
         if self.model_path is not None and os.path.exists(ckpt_path):
             checkpoint = torch.load(ckpt_path, map_location=self.device)
@@ -233,14 +251,19 @@ class ImputationModel:
             for param in encoder.parameters():
                 param.requires_grad = False
 
-        self.params_G = chain(
+        self.params_G = list(chain(
             self.G_A.parameters(),
             self.G_B.parameters(),
             self.D_A.parameters(),
             self.D_B.parameters()
-        )
+        ))
 
-        self.optimizer_G = optim.AdamW(self.params_G, lr=1e-3, weight_decay=1e-3)
+        if self.dispersion_A is not None:
+            self.params_G.append(self.dispersion_A)
+        if self.dispersion_B is not None:
+            self.params_G.append(self.dispersion_B)
+        
+        self.optimizer_G = optim.AdamW(self.params_G, lr=1e-3, weight_decay=0.0)
 
     def _set_train_mode(self) -> None:
         for model in [self.G_A, self.G_B, self.D_A, self.D_B]:
@@ -259,6 +282,30 @@ class ImputationModel:
             f"loss_LA: {self.lambdaLA * loss_dict['LA']:.4f} | "
             f"loss_Recon_y: {self.lambdaRecon_y * loss_dict['Recon_y']:.4f} "
         )
+
+    def compute_Recony(self, approx_features, counts, loss_type, dispersion=None, eps=1e-8):
+        if loss_type == 'nb':
+            library_size = counts.sum(dim=1, keepdim=True)
+            px_scale = F.softmax(approx_features, dim=-1)
+            px_rate = px_scale * library_size
+            if dispersion is None:
+                raise ValueError("dispersion must be provided for NB loss")
+            px_r = F.softplus(dispersion) + eps
+            reconstruction_loss = -log_nb_positive(counts, px_rate, px_r).mean() / counts.shape[1]
+        elif loss_type == 'bce':
+            reconstruct = torch.sigmoid(approx_features)
+            reconstruction_loss = F.binary_cross_entropy(
+                reconstruct,
+                counts,
+                reduction='none'
+            ).sum(-1).mean() * 10 / counts.shape[1]
+        elif loss_type == 'l2':
+            reconstruction_loss = torch.mean((approx_features - counts) ** 2)
+        else:
+            raise ValueError(f"Unsupported loss_type: {loss_type}")
+
+        return reconstruction_loss
+
 
 
 
