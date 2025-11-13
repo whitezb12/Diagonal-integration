@@ -283,15 +283,6 @@ def generalized_clip_loss_stable_masked(
 
 
 def log_nb_positive(x, mu, theta, eps=1e-8, return_sum=True):
-    """
-    Note: All inputs should be torch Tensors
-    log likelihood (scalar) of a minibatch according to a nb model.
-
-    Variables:
-    mu: mean of the negative binomial (has to be positive support) (shape: minibatch x genes)
-    theta: inverse dispersion parameter (has to be positive support) (shape: minibatch x genes)
-    eps: numerical stability constant
-    """
     if theta.ndimension() == 1:
         theta = theta.view(
             1, theta.size(0)
@@ -309,3 +300,10 @@ def log_nb_positive(x, mu, theta, eps=1e-8, return_sum=True):
     if return_sum:
         res = torch.sum(res, dim=-1)
     return res
+
+
+def zscore_numpy(X: np.ndarray, axis: int = 0, eps: float = 1e-8) -> np.ndarray:
+    mean = np.mean(X, axis=axis, keepdims=True)
+    std = np.std(X, axis=axis, keepdims=True)
+    X_z = (X - mean) / (std + eps)
+    return X_z
