@@ -24,10 +24,9 @@ class IntegrationModel:
         n_latent: int = 10,
         lambdaRecon: float = 10.0,
         lambdaLA: float = 10.0,
-        lambdaAlign: float = 1.0,
+        lambdaBM: float = 2.0,
         lambdamGAN: float = 1.0,
         lambdabGAN: float = 1.0,
-        lambdaGeo: float = 0.5,
         lambdaCLIP: float = 0.1,
         use_prior: bool = False,
         celltype_col: Optional[str] = None,
@@ -47,11 +46,10 @@ class IntegrationModel:
         self.training_steps = training_steps
         self.n_latent = n_latent
         self.lambdaRecon = lambdaRecon
-        self.lambdaAlign = lambdaAlign
+        self.lambdaBM = lambdaBM
         self.lambdaLA = lambdaLA
         self.lambdamGAN = lambdamGAN
         self.lambdabGAN = lambdabGAN
-        self.lambdaGeo = lambdaGeo
         self.lambdaCLIP = lambdaCLIP
         self.use_prior = use_prior
         self.celltype_col = celltype_col
@@ -104,10 +102,11 @@ class IntegrationModel:
             loss_dict = {}
 
             # discriminator loss
-            self.optimizer_Dis_m.zero_grad()
-            loss_dict['mDis'] = self.compute_discriminator_loss_inter(z_A.detach(), z_B.detach())
-            loss_dict['mDis'].backward()
-            self.optimizer_Dis_m.step()
+            for _ in range(3):
+                self.optimizer_Dis_m.zero_grad()
+                loss_dict['mDis'] = self.compute_discriminator_loss_inter(z_A.detach(), z_B.detach())
+                loss_dict['mDis'].backward()
+                self.optimizer_Dis_m.step()
 
             if self.optimizer_Dis_b:
                 self.optimizer_Dis_b.zero_grad()
@@ -127,26 +126,17 @@ class IntegrationModel:
             loss_LA_BtoA = torch.mean((z_B - z_BtoA)**2)
             loss_dict['LA'] = loss_LA_AtoB + loss_LA_BtoA         
 
-            # modality align loss
+            # optimal transport process
             c_link = pairwise_correlation_distance(batch_A['link_feat'], batch_B['link_feat']).to(self.device)
-            plan = unbalanced_ot(cost_pp=c_link, reg=0.05, reg_m=0.5, device=self.device)
-            z_dist = torch.mean((z_A.view(self.batch_size, 1, -1) - z_B.view(1, self.batch_size, -1))**2, dim=2)
-            loss_dict['Align'] = torch.sum(plan * z_dist) / torch.sum(plan)
+            T_AtoB = unbalanced_ot(cost_pp=c_link, reg=0.05, reg_m=0.5, device=self.device)
+            T_BtoA = unbalanced_ot(cost_pp=c_link.T, reg=0.05, reg_m=0.5, device=self.device)
 
-            # geometric loss
-            switch_interval = 2
-            if step // switch_interval % 2 == 0:
-                c_cross = pairwise_correlation_distance(z_A.detach(), z_B.detach())
-                T = unbalanced_ot(cost_pp=c_cross, reg=0.05, reg_m=0.5, device=self.device)
-                L_A = Graph_Laplacian_torch(z_A, nearest_neighbor=min(30, z_A.size(0)-1))
-                z_A_new = Transform(z_A, z_B, T, L_A, lamda_Eigenvalue=0.5)
-                loss_dict['Geo'] = torch.mean((z_A - z_A_new) ** 2)
-            else:
-                c_cross = pairwise_correlation_distance(z_B.detach(), z_A.detach())
-                T = unbalanced_ot(cost_pp=c_cross, reg=0.05, reg_m=0.5, device=self.device)
-                L_B = Graph_Laplacian_torch(z_B, nearest_neighbor=min(30, z_B.size(0)-1))
-                z_B_new = Transform(z_B, z_A, T, L_B, lamda_Eigenvalue=0.5)
-                loss_dict['Geo'] = torch.mean((z_B - z_B_new) ** 2)
+            # Barycenter Mapping loss
+            L_A = Graph_Laplacian_torch(z_A, nearest_neighbor=min(30, z_A.size(0)-1))
+            L_B = Graph_Laplacian_torch(z_B, nearest_neighbor=min(30, z_B.size(0)-1))
+            z_A_new = Transform(z_A, z_B, torch.t(T_BtoA), L_A, lamda_Eigenvalue=0.1)
+            z_B_new = Transform(z_B, z_A, torch.t(T_AtoB), L_B, lamda_Eigenvalue=0.1)
+            loss_dict['BM'] = torch.mean((z_A - z_A_new) ** 2) + torch.mean((z_B - z_B_new) ** 2)
             
             # semi-supervised clip loss(optional)
             if self.use_prior:
@@ -162,8 +152,7 @@ class IntegrationModel:
             total_loss = (
                 self.lambdaRecon * loss_dict['AE']
                 + self.lambdaLA * loss_dict['LA']
-                + self.lambdaAlign * loss_dict['Align']
-                + min(step/self.training_steps, 0.5)*self.lambdaGeo * loss_dict['Geo']
+                + self.lambdaBM * loss_dict['BM']
                 + self.lambdamGAN * loss_dict['mGAN']
                 + self.lambdabGAN * loss_dict['bGAN']
                 + self.lambdaCLIP * loss_dict['CLIP']
@@ -313,11 +302,10 @@ class IntegrationModel:
             f"Step {step} | "
             f"loss_Recon: {self.lambdaRecon * loss_dict['AE']:.4f} | "
             f"loss_LA: {self.lambdaLA * loss_dict['LA']:.4f} | "
-            f"loss_Align: {self.lambdaAlign * loss_dict['Align']:.4f} | "
-            f"loss_Geo: {self.lambdaGeo * loss_dict['Geo']:.4f} | "
+            f"loss_BM: {self.lambdaBM * loss_dict['BM']:.4f} | "
             f"loss_CLIP: {self.lambdaCLIP * loss_dict['CLIP']:.4f} | "
-            f"loss_mGAN vs loss_mDis: {loss_dict['mGAN']:.4f} vs {loss_dict['mDis']:.4f} | "
-            f"loss_bGAN vs loss_bDis: {loss_dict['bGAN']:.4f} vs {loss_dict['bDis']:.4f}"
+            f"loss_mGAN: {loss_dict['mGAN']:.4f}| "
+            f"loss_bGAN: {loss_dict['bGAN']:.4f}"
         )
 
 
