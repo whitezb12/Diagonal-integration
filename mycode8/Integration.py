@@ -24,7 +24,8 @@ class IntegrationModel:
         n_latent: int = 10,
         lambdaRecon: float = 10.0,
         lambdaLA: float = 10.0,
-        lambdaBM: float = 2.0,
+        lambdaOT: float = 1.0,
+        lambdaBM: float = 1.0,
         lambdamGAN: float = 1.0,
         lambdabGAN: float = 1.0,
         lambdaCLIP: float = 0.1,
@@ -45,9 +46,10 @@ class IntegrationModel:
         self.batch_size = batch_size
         self.training_steps = training_steps
         self.n_latent = n_latent
-        self.lambdaRecon = lambdaRecon
-        self.lambdaBM = lambdaBM
+        self.lambdaRecon = lambdaRecon        
         self.lambdaLA = lambdaLA
+        self.lambdaOT = lambdaOT
+        self.lambdaBM = lambdaBM
         self.lambdamGAN = lambdamGAN
         self.lambdabGAN = lambdabGAN
         self.lambdaCLIP = lambdaCLIP
@@ -124,20 +126,26 @@ class IntegrationModel:
             # latent align loss
             loss_LA_AtoB = torch.mean((z_A - z_AtoB)**2)
             loss_LA_BtoA = torch.mean((z_B - z_BtoA)**2)
-            loss_dict['LA'] = loss_LA_AtoB + loss_LA_BtoA         
+            loss_dict['LA'] = loss_LA_AtoB + loss_LA_BtoA       
 
             # optimal transport process
             c_link = pairwise_correlation_distance(batch_A['link_feat'], batch_B['link_feat']).to(self.device)
-            T_AtoB = unbalanced_ot(cost_pp=c_link, reg=0.05, reg_m=0.5, device=self.device)
-            T_BtoA = unbalanced_ot(cost_pp=c_link.T, reg=0.05, reg_m=0.5, device=self.device)
+            P = unbalanced_ot(cost_pp=c_link, reg=0.05, reg_m=0.5, device=self.device)  
+       
+            # OT loss            
+            W_A = Graph_weight(z_A, nearest_neighbor=min(5, z_A.size(0)-1))
+            W_B = Graph_weight(z_B, nearest_neighbor=min(5, z_B.size(0)-1))
+            P_hat = Graph_weight_smooth_P(P, W_A, W_B, alpha=0.1)
+            z_dist = torch.mean((z_A.view(self.batch_size, 1, -1) - z_B.view(1, self.batch_size, -1))**2, dim=2)
+            loss_dict['OT'] = torch.sum(P_hat * z_dist)/torch.sum(P_hat) 
 
             # Barycenter Mapping loss
-            L_A = Graph_Laplacian_torch(z_A, nearest_neighbor=min(30, z_A.size(0)-1))
-            L_B = Graph_Laplacian_torch(z_B, nearest_neighbor=min(30, z_B.size(0)-1))
-            z_A_new = Transform(z_A, z_B, torch.t(T_BtoA), L_A, lamda_Eigenvalue=0.1)
-            z_B_new = Transform(z_B, z_A, torch.t(T_AtoB), L_B, lamda_Eigenvalue=0.1)
+            L_A = torch.diag(W_A.sum(1)) - W_A
+            L_B = torch.diag(W_B.sum(1)) - W_B
+            z_A_new = Transform(z_A, z_B, P, L_A, lamda_Eigenvalue=0.1)
+            z_B_new = Transform(z_B, z_A, torch.t(P), L_B, lamda_Eigenvalue=0.1)
             loss_dict['BM'] = torch.mean((z_A - z_A_new) ** 2) + torch.mean((z_B - z_B_new) ** 2)
-            
+
             # semi-supervised clip loss(optional)
             if self.use_prior:
                 prior_matrix = build_celltype_prior(batch_A['celltype'], batch_B['celltype']).to(self.device)
@@ -152,6 +160,7 @@ class IntegrationModel:
             total_loss = (
                 self.lambdaRecon * loss_dict['AE']
                 + self.lambdaLA * loss_dict['LA']
+                + self.lambdaOT * loss_dict['OT']
                 + self.lambdaBM * loss_dict['BM']
                 + self.lambdamGAN * loss_dict['mGAN']
                 + self.lambdabGAN * loss_dict['bGAN']
@@ -302,6 +311,7 @@ class IntegrationModel:
             f"Step {step} | "
             f"loss_Recon: {self.lambdaRecon * loss_dict['AE']:.4f} | "
             f"loss_LA: {self.lambdaLA * loss_dict['LA']:.4f} | "
+            f"loss_OT: {self.lambdaOT * loss_dict['OT']:.4f} | "
             f"loss_BM: {self.lambdaBM * loss_dict['BM']:.4f} | "
             f"loss_CLIP: {self.lambdaCLIP * loss_dict['CLIP']:.4f} | "
             f"loss_mGAN: {loss_dict['mGAN']:.4f}| "
