@@ -109,21 +109,12 @@ def batch_scale(adata: AnnData, method: str = 'maxabs') -> None:
             adata.X[idx] = scaler.transform(X_batch)
 
 
-def build_mnn_prior(Sim: torch.Tensor, k: int) -> torch.Tensor:
-    row_mask = torch.zeros_like(Sim, dtype=torch.bool)
-    col_mask = torch.zeros_like(Sim, dtype=torch.bool)
-    row_mask.scatter_(1, Sim.topk(k, dim=1, largest=False).indices, True)
-    col_mask.scatter_(0, Sim.topk(k, dim=0, largest=False).indices, True)
-    mnn_mask = row_mask & col_mask
-    return torch.where(mnn_mask, 1.0, 0.0)
-
-
 def build_celltype_prior(
     list1: List[Union[str, None]],
     list2: List[Union[str, None]]
 ) -> torch.Tensor:
-    arr1 = np.array(list1, dtype=object, copy=True)
-    arr2 = np.array(list2, dtype=object, copy=True)
+    arr1 = np.array(list1, dtype=object)
+    arr2 = np.array(list2, dtype=object)
 
     def missing_mask(arr: np.ndarray) -> np.ndarray:
         arr_str = np.char.lower(np.array(arr, str))
@@ -210,7 +201,7 @@ def unbalanced_ot(
     return None if torch.isnan(out).sum() > 0 else out
 
 
-def Graph_Laplacian_torch(
+def Graph_weight(
     X: torch.Tensor,
     nearest_neighbor: int = 30,
     t: float = 1.0
@@ -220,11 +211,23 @@ def Graph_Laplacian_torch(
     values, indices = torch.topk(D, nearest_neighbor + 1, dim=1, largest=False)
     pos = D > values[:, nearest_neighbor].view(-1, 1)
     D[pos] = 0.0
-    W = D + D.T.multiply(D.T > D) - D.multiply(D.T > D)
+    W = D * (D.T>0)
     index_pos = torch.where(W > 0)
     W_mean = torch.mean(W[index_pos])
     W[index_pos] = torch.exp(-W[index_pos] / (t * W_mean))
-    return (torch.diag(W.sum(1)) - W).detach()
+    return W
+
+
+def Graph_weight_smooth_P(
+    P: torch.Tensor,
+    W_A: torch.Tensor,
+    W_B: torch.Tensor,
+    alpha: float = 0.5
+) -> torch.Tensor:
+    I_A = torch.eye(W_A.size(0), device=W_A.device)
+    I_B = torch.eye(W_B.size(0), device=W_B.device)
+    P_hat = (I_A + alpha * W_A) @ P @ (I_B + alpha * W_B)
+    return P_hat
 
 
 def Transform(
