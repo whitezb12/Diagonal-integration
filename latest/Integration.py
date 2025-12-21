@@ -24,6 +24,7 @@ class IntegrationModel:
         n_latent: int = 10,
         lambdaRecon: float = 10.0,
         lambdaLA: float = 10.0,
+        lambdaDA: float = 1.0,
         lambdaBM: float = 1.0,
         lambdamGAN: float = 1.0,
         lambdabGAN: float = 1.0,
@@ -47,6 +48,7 @@ class IntegrationModel:
         self.n_latent = n_latent
         self.lambdaRecon = lambdaRecon        
         self.lambdaLA = lambdaLA
+        self.lambdaDA = lambdaDA
         self.lambdaBM = lambdaBM
         self.lambdamGAN = lambdamGAN
         self.lambdabGAN = lambdabGAN
@@ -92,13 +94,11 @@ class IntegrationModel:
             sigma_A = torch.exp(0.5 * logvar_A)
             sigma_B = torch.exp(0.5 * logvar_B)
 
-            x_AtoB = self.G_B(z_A)
-            x_BtoA = self.G_A(z_B)
+            x_AtoB = self.G_B(mu_A)
+            x_BtoA = self.G_A(mu_B)
 
-            z_AtoB, mu_AtoB, logvar_AtoB = self.E_B(x_AtoB)
-            z_BtoA, mu_BtoA, logvar_BtoA = self.E_A(x_BtoA)
-            sigma_AtoB = torch.exp(0.5 * logvar_AtoB)
-            sigma_BtoA = torch.exp(0.5 * logvar_BtoA)
+            _, mu_AtoB, _ = self.E_B(x_AtoB)
+            _, mu_BtoA, _ = self.E_A(x_BtoA)
 
             x_Arecon = self.G_A(z_A)
             x_Brecon = self.G_B(z_B)
@@ -126,13 +126,17 @@ class IntegrationModel:
             loss_dict['AE'] = loss_AE_A + loss_AE_B
 
             # latent align loss
-            loss_LA_AtoB = torch.mean((mu_A - mu_AtoB)**2) + torch.mean((sigma_A - sigma_AtoB)**2)
-            loss_LA_BtoA = torch.mean((mu_B - mu_BtoA)**2) + torch.mean((sigma_B - sigma_BtoA)**2)
+            loss_LA_AtoB = torch.mean((mu_A - mu_AtoB)**2) 
+            loss_LA_BtoA = torch.mean((mu_B - mu_BtoA)**2) 
             loss_dict['LA'] = loss_LA_AtoB + loss_LA_BtoA       
 
             # optimal transport process
             C = pairwise_correlation_distance(batch_A['link_feat'], batch_B['link_feat']).to(self.device)
             P = unbalanced_ot(cost_pp=C, reg=0.05, reg_m=0.5, device=self.device)  
+
+            # optimal transport loss
+            z_dist = pairwise_euclidean_distance(mu_A, mu_B) + pairwise_euclidean_distance(sigma_A, sigma_B)
+            loss_dict['DA'] = torch.sum(P*z_dist)/torch.sum(P)
             
             # Barycenter Mapping loss
             K = 30  
@@ -150,13 +154,17 @@ class IntegrationModel:
                 loss_dict['CLIP'] = torch.tensor(0.0, device=self.device)
 
             # generator loss
-            margin = 50.0
+            if step<5:
+                margin = 50.0
+            else:
+                margin = 5.0
             loss_dict['mGAN'] = -(F.softplus(-torch.clamp(self.Dis_Z(z_A), -margin, margin)) + F.softplus(torch.clamp(self.Dis_Z(z_B), -margin, margin))).mean()
             loss_dict['bGAN'] = -self.compute_discriminator_loss_intra(z_A, z_B, batch_A, batch_B)
             
             total_loss = (
                 self.lambdaRecon * loss_dict['AE']
                 + self.lambdaLA * loss_dict['LA']
+                + self.lambdaDA * loss_dict['DA']
                 + self.lambdaBM * loss_dict['BM']
                 + self.lambdamGAN * loss_dict['mGAN']
                 + self.lambdabGAN * loss_dict['bGAN']
@@ -168,7 +176,7 @@ class IntegrationModel:
             torch.nn.utils.clip_grad_norm_(self.params_G, 5.0)
             self.optimizer_G.step()
 
-            if step % 1000 == 0:
+            if step % 2000 == 0:
                 self.log(step, loss_dict)
 
         self.train_time = time.time() - begin_time
@@ -307,12 +315,12 @@ class IntegrationModel:
             f"Step {step} | "
             f"loss_Recon: {self.lambdaRecon * loss_dict['AE']:.4f} | "
             f"loss_LA: {self.lambdaLA * loss_dict['LA']:.4f} | "
+            f"loss_DA: {self.lambdaDA * loss_dict['DA']:.4f} | "
             f"loss_BM: {self.lambdaBM * loss_dict['BM']:.4f} | "
             f"loss_CLIP: {self.lambdaCLIP * loss_dict['CLIP']:.4f} | "
             f"loss_mGAN: {loss_dict['mGAN']:.4f}| "
             f"loss_bGAN: {loss_dict['bGAN']:.4f}"
         )
-
 
 
 
