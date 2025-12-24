@@ -22,9 +22,9 @@ class IntegrationModel:
         training_steps: int = 10000,
         seed: int = 1234,
         n_latent: int = 10,
+        cut_off: float = 0.9,
         lambdaRecon: float = 10.0,
         lambdaLA: float = 10.0,
-        lambdaDA: float = 1.0,
         lambdaBM: float = 1.0,
         lambdamGAN: float = 1.0,
         lambdabGAN: float = 1.0,
@@ -46,9 +46,9 @@ class IntegrationModel:
         self.batch_size = batch_size
         self.training_steps = training_steps
         self.n_latent = n_latent
+        self.cut_off = cut_off
         self.lambdaRecon = lambdaRecon        
         self.lambdaLA = lambdaLA
-        self.lambdaDA = lambdaDA
         self.lambdaBM = lambdaBM
         self.lambdamGAN = lambdamGAN
         self.lambdabGAN = lambdabGAN
@@ -105,20 +105,6 @@ class IntegrationModel:
 
             loss_dict = {}
 
-            # discriminator loss
-            self.optimizer_Dis_m.zero_grad()
-            loss_dict['mDis'] = (F.softplus(-self.Dis_Z(z_A.detach())) + F.softplus(self.Dis_Z(z_B.detach()))).mean()
-            loss_dict['mDis'].backward()
-            self.optimizer_Dis_m.step()
-
-            if self.optimizer_Dis_b:
-                self.optimizer_Dis_b.zero_grad()
-                loss_dict['bDis'] = self.compute_discriminator_loss_intra(z_A.detach(), z_B.detach(), batch_A, batch_B)
-                loss_dict['bDis'].backward()
-                self.optimizer_Dis_b.step()
-            else:
-                loss_dict['bDis'] = torch.tensor(0.0, device=self.device)
-
             # input autoencoder loss
             beta = 0.01
             loss_AE_A = torch.mean((x_Arecon - x_A)**2) + beta * kl_divergence(mu_A, logvar_A)
@@ -133,15 +119,11 @@ class IntegrationModel:
             # optimal transport process
             C = pairwise_correlation_distance(batch_A['link_feat'], batch_B['link_feat']).to(self.device)
             P = unbalanced_ot(cost_pp=C, reg=0.05, reg_m=0.5, device=self.device)  
-
-            # optimal transport loss
-            z_dist = pairwise_euclidean_distance(mu_A, mu_B) + pairwise_euclidean_distance(sigma_A, sigma_B)
-            loss_dict['DA'] = torch.sum(P*z_dist)/torch.sum(P)
             
             # Barycenter Mapping loss
             K = 30  
-            L_A = Graph_Laplacian_torch(z_A, nearest_neighbor=min(K, z_A.size(0)-1))
-            L_B = Graph_Laplacian_torch(z_B, nearest_neighbor=min(K, z_B.size(0)-1))
+            L_A = Graph_Laplacian_torch(x_A, nearest_neighbor=min(K, z_A.size(0)-1))
+            L_B = Graph_Laplacian_torch(x_B, nearest_neighbor=min(K, z_B.size(0)-1))
             z_A_new = Transform(z_A, z_B, P, L_A, lamda_Eigenvalue=0.5)
             z_B_new = Transform(z_B, z_A, torch.t(P), L_B, lamda_Eigenvalue=0.5)
             loss_dict['BM'] = torch.mean((z_A - z_A_new) ** 2) + torch.mean((z_B - z_B_new) ** 2)
@@ -153,18 +135,42 @@ class IntegrationModel:
             else:
                 loss_dict['CLIP'] = torch.tensor(0.0, device=self.device)
 
-            # generator loss
-            if step<5:
+            # discriminator loss
+            if step < 5:
                 margin = 50.0
             else:
                 margin = 5.0
-            loss_dict['mGAN'] = -(F.softplus(-torch.clamp(self.Dis_Z(z_A), -margin, margin)) + F.softplus(torch.clamp(self.Dis_Z(z_B), -margin, margin))).mean()
+            Sim = pairwise_cosine(mu_A.detach(), mu_B.detach())
+            w_A = Sim.max(dim=1).values 
+            w_B = Sim.max(dim=0).values
+            w_A = (w_A>self.cut_off).float()
+            w_B = (w_B>self.cut_off).float()
+            
+            for _ in range(1): 
+                self.optimizer_Dis_m.zero_grad() 
+                loss_mDis_A = (w_A * F.softplus(-self.Dis_Z(z_A.detach()).view(-1))).sum() / (w_A.sum() + 1e-6) 
+                loss_mDis_B = (w_B * F.softplus(self.Dis_Z(z_B.detach()).view(-1))).sum() / (w_B.sum() + 1e-6) 
+                loss_dict['mDis'] = loss_mDis_A + loss_mDis_B 
+                loss_dict['mDis'].backward() 
+                self.optimizer_Dis_m.step()
+
+            if self.optimizer_Dis_b:
+                self.optimizer_Dis_b.zero_grad()
+                loss_dict['bDis'] = self.compute_discriminator_loss_intra(z_A.detach(), z_B.detach(), batch_A, batch_B)
+                loss_dict['bDis'].backward()
+                self.optimizer_Dis_b.step()
+            else:
+                loss_dict['bDis'] = torch.tensor(0.0, device=self.device)
+
+            # generator loss
+            loss_mGAN_A = (w_A * F.softplus(-torch.clamp(self.Dis_Z(z_A).view(-1), -margin, margin))).sum() / (w_A.sum() + 1e-6) 
+            loss_mGAN_B = (w_B * F.softplus(torch.clamp(self.Dis_Z(z_B).view(-1), -margin, margin))).sum() / (w_B.sum() + 1e-6) 
+            loss_dict['mGAN'] = -(loss_mGAN_A + loss_mGAN_B)
             loss_dict['bGAN'] = -self.compute_discriminator_loss_intra(z_A, z_B, batch_A, batch_B)
             
             total_loss = (
                 self.lambdaRecon * loss_dict['AE']
                 + self.lambdaLA * loss_dict['LA']
-                + self.lambdaDA * loss_dict['DA']
                 + self.lambdaBM * loss_dict['BM']
                 + self.lambdamGAN * loss_dict['mGAN']
                 + self.lambdabGAN * loss_dict['bGAN']
@@ -176,7 +182,7 @@ class IntegrationModel:
             torch.nn.utils.clip_grad_norm_(self.params_G, 5.0)
             self.optimizer_G.step()
 
-            if step % 2000 == 0:
+            if step % 1000 == 0:
                 self.log(step, loss_dict)
 
         self.train_time = time.time() - begin_time
@@ -207,7 +213,7 @@ class IntegrationModel:
             _, mu_A, _ = self.E_A(x_A)
             _, mu_B, _ = self.E_B(x_B)
 
-        self.latent = np.concatenate((mu_A.detach().cpu().numpy(), mu_B.detach().cpu().numpy()), axis=0)
+        self.latent = np.concatenate((mu_A.cpu().numpy(), mu_B.cpu().numpy()), axis=0)
 
         end_time = time.time()
         print(f"Completed at: {time.asctime(time.localtime(end_time))}")
@@ -229,8 +235,8 @@ class IntegrationModel:
             _, mu_B, _ = self.E_B(x_B)
             x_AtoB = self.G_B(mu_A)
             x_BtoA = self.G_A(mu_B)
-            self.imputed_BtoA = x_BtoA.detach().cpu().numpy()
-            self.imputed_AtoB = x_AtoB.detach().cpu().numpy()
+            self.imputed_BtoA = x_BtoA.cpu().numpy()
+            self.imputed_AtoB = x_AtoB.cpu().numpy()
 
         end_time = time.time()
         print(f"Completed at: {time.asctime(time.localtime(end_time))}")
@@ -315,13 +321,11 @@ class IntegrationModel:
             f"Step {step} | "
             f"loss_Recon: {self.lambdaRecon * loss_dict['AE']:.4f} | "
             f"loss_LA: {self.lambdaLA * loss_dict['LA']:.4f} | "
-            f"loss_DA: {self.lambdaDA * loss_dict['DA']:.4f} | "
             f"loss_BM: {self.lambdaBM * loss_dict['BM']:.4f} | "
             f"loss_CLIP: {self.lambdaCLIP * loss_dict['CLIP']:.4f} | "
             f"loss_mGAN: {loss_dict['mGAN']:.4f}| "
             f"loss_bGAN: {loss_dict['bGAN']:.4f}"
         )
-
 
 
 
