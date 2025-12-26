@@ -20,6 +20,7 @@ class IntegrationModel:
         input_key: List[Optional[str]] = ['X_pca', 'X_lsi'],
         batch_size: int = 500,
         training_steps: int = 10000,
+        warmups: int = 2000,
         seed: int = 1234,
         n_latent: int = 10,
         cut_off: float = 0.9,
@@ -46,6 +47,7 @@ class IntegrationModel:
 
         self.batch_size = batch_size
         self.training_steps = training_steps
+        self.warmups = warmups
         self.n_latent = n_latent
         self.cut_off = cut_off
         self.lambdaRecon = lambdaRecon        
@@ -82,6 +84,7 @@ class IntegrationModel:
     def train(self) -> None:
         self._init_models_and_optimizers()
         self._set_train_mode()
+        self.bm_loss = SharedBarycenterLoss(K=10, lamda_eigen=0.5, min_shared=64, warmup=self.warmups)
         iterator_A, iterator_B = iter(self.dataloader_A), iter(self.dataloader_B)
         begin_time = time.time()
         print("Training started at:", time.asctime())
@@ -106,6 +109,7 @@ class IntegrationModel:
             x_Brecon = self.G_B(z_B)            
             
             Sim = pairwise_cosine(mu_A.detach(), mu_B.detach())
+            Sim = Sim / Sim.max()
             max_A = Sim.max(dim=1).values 
             max_B = Sim.max(dim=0).values
             mask_A = (max_A > self.cut_off)
@@ -133,24 +137,17 @@ class IntegrationModel:
             loss_dict['DA'] = torch.sum(P * z_dist) / torch.sum(P)
 
             # Barycenter Mapping loss
-            K = 30  
-            L_A = Graph_Laplacian_torch(x_A, nearest_neighbor=min(K, z_A.size(0)-1))
-            L_B = Graph_Laplacian_torch(x_B, nearest_neighbor=min(K, z_B.size(0)-1))
-            z_A_new = Transform(z_A, z_B, P, L_A, lamda_Eigenvalue=0.5)
-            z_B_new = Transform(z_B, z_A, torch.t(P), L_B, lamda_Eigenvalue=0.5)
-            loss_dict['BM'] = torch.mean((z_A[mask_A] - z_A_new[mask_A]) ** 2) + torch.mean((z_B[mask_B] - z_B_new[mask_B]) ** 2)
+            loss_dict['BM'] = self.bm_loss(C, z_A, z_B, mask_A, mask_B, step)
 
             # discriminator loss
-            if step < 5:
-                margin = 50.0
-            else:
-                margin = 5.0
+            margin = 1.0
             for _ in range(3): 
                 self.optimizer_Dis_m.zero_grad() 
                 loss_mDis_A = (F.softplus(-torch.clamp(self.Dis_Z(z_A[mask_A].detach()), -margin, margin))).mean()
                 loss_mDis_B = (F.softplus(torch.clamp(self.Dis_Z(z_B[mask_B].detach()), -margin, margin))).mean()
-                loss_dict['mDis'] = loss_mDis_A + loss_mDis_B
-                loss_dict['mDis'].backward() 
+                alpha = min(1.0, max(0.0, (step - self.warmups) / 500))
+                loss_dict['mDis'] = alpha * (loss_mDis_A + loss_mDis_B)
+                loss_dict['mDis'].backward()
                 self.optimizer_Dis_m.step()
 
             if self.optimizer_Dis_b:
@@ -164,7 +161,8 @@ class IntegrationModel:
             # generator loss
             loss_mGAN_A = -(F.softplus(-torch.clamp(self.Dis_Z(z_A[mask_A]), -margin, margin))).mean()
             loss_mGAN_B = -(F.softplus(torch.clamp(self.Dis_Z(z_B[mask_B]), -margin, margin))).mean()
-            loss_dict['mGAN'] = loss_mGAN_A + loss_mGAN_B
+            alpha = min(1.0, max(0.0, (step - self.warmups) / 500))
+            loss_dict['mGAN'] = alpha * (loss_mGAN_A + loss_mGAN_B) 
             loss_dict['bGAN'] = -self.compute_discriminator_loss_intra(z_A, z_B, batch_A, batch_B)           
             
             # semi-supervised clip loss(optional)
@@ -336,4 +334,42 @@ class IntegrationModel:
         )
 
 
+
+class SharedBarycenterLoss(torch.nn.Module):
+    def __init__(
+        self,
+        K=10,
+        lamda_eigen=0.5,
+        min_shared=64,
+        warmup=2000,
+    ):
+        super().__init__()
+        self.K = K
+        self.lamda_eigen = lamda_eigen
+        self.min_shared = min_shared
+        self.warmup = warmup
+
+    def forward(self, C, z_A, z_B, mask_A, mask_B, step):
+        device = z_A.device
+
+        if step < self.warmup:
+            return torch.tensor(0.0, device=device)
+
+        if mask_A.sum() < self.min_shared or mask_B.sum() < self.min_shared:
+            return torch.tensor(0.0, device=device)
+
+        z_A_s = z_A[mask_A]
+        z_B_s = z_B[mask_B]
+
+        C_s = C[mask_A][:, mask_B]
+        P_s = unbalanced_ot(cost_pp=C_s, reg=0.05, reg_m=0.5, device=device)  
+
+        L_A = Graph_Laplacian_torch(z_A_s, nearest_neighbor=min(self.K, z_A_s.size(0) - 1))
+        L_B = Graph_Laplacian_torch(z_B_s, nearest_neighbor=min(self.K, z_B_s.size(0) - 1))
+
+        z_A_new = Transform(z_A_s, z_B_s, P_s, L_A, lamda_Eigenvalue=self.lamda_eigen)
+        z_B_new = Transform(z_B_s, z_A_s, P_s.t(), L_B, lamda_Eigenvalue=self.lamda_eigen)
+        loss = torch.mean((z_A_s - z_A_new) ** 2) + torch.mean((z_B_s - z_B_new) ** 2)
+
+        return loss
 
