@@ -25,6 +25,7 @@ class IntegrationModel:
         cut_off: float = 0.9,
         lambdaRecon: float = 10.0,
         lambdaLA: float = 10.0,
+        lambdaDA: float = 1.0,
         lambdaBM: float = 1.0,
         lambdamGAN: float = 1.0,
         lambdabGAN: float = 1.0,
@@ -49,6 +50,7 @@ class IntegrationModel:
         self.cut_off = cut_off
         self.lambdaRecon = lambdaRecon        
         self.lambdaLA = lambdaLA
+        self.lambdaDA = lambdaDA
         self.lambdaBM = lambdaBM
         self.lambdamGAN = lambdamGAN
         self.lambdabGAN = lambdabGAN
@@ -101,7 +103,13 @@ class IntegrationModel:
             _, mu_BtoA, _ = self.E_A(x_BtoA)
 
             x_Arecon = self.G_A(z_A)
-            x_Brecon = self.G_B(z_B)
+            x_Brecon = self.G_B(z_B)            
+            
+            Sim = pairwise_cosine(mu_A.detach(), mu_B.detach())
+            max_A = Sim.max(dim=1).values 
+            max_B = Sim.max(dim=0).values
+            mask_A = (max_A > self.cut_off)
+            mask_B = (max_B > self.cut_off)
 
             loss_dict = {}
 
@@ -119,38 +127,29 @@ class IntegrationModel:
             # optimal transport process
             C = pairwise_correlation_distance(batch_A['link_feat'], batch_B['link_feat']).to(self.device)
             P = unbalanced_ot(cost_pp=C, reg=0.05, reg_m=0.5, device=self.device)  
-            
+
+            # distribution alignment loss
+            z_dist = pairwise_euclidean_distance(mu_A, mu_B) + pairwise_euclidean_distance(sigma_A, sigma_B)
+            loss_dict['DA'] = torch.sum(P * z_dist) / torch.sum(P)
+
             # Barycenter Mapping loss
             K = 30  
             L_A = Graph_Laplacian_torch(x_A, nearest_neighbor=min(K, z_A.size(0)-1))
             L_B = Graph_Laplacian_torch(x_B, nearest_neighbor=min(K, z_B.size(0)-1))
             z_A_new = Transform(z_A, z_B, P, L_A, lamda_Eigenvalue=0.5)
             z_B_new = Transform(z_B, z_A, torch.t(P), L_B, lamda_Eigenvalue=0.5)
-            loss_dict['BM'] = torch.mean((z_A - z_A_new) ** 2) + torch.mean((z_B - z_B_new) ** 2)
-
-            # semi-supervised clip loss(optional)
-            if self.use_prior:
-                prior_matrix = build_celltype_prior(batch_A['celltype'], batch_B['celltype']).to(self.device)
-                loss_dict['CLIP'] = generalized_clip_loss_stable_masked(z_A, z_B, prior_matrix)
-            else:
-                loss_dict['CLIP'] = torch.tensor(0.0, device=self.device)
+            loss_dict['BM'] = torch.mean((z_A[mask_A] - z_A_new[mask_A]) ** 2) + torch.mean((z_B[mask_B] - z_B_new[mask_B]) ** 2)
 
             # discriminator loss
             if step < 5:
                 margin = 50.0
             else:
                 margin = 5.0
-            Sim = pairwise_cosine(mu_A.detach(), mu_B.detach())
-            w_A = Sim.max(dim=1).values 
-            w_B = Sim.max(dim=0).values
-            w_A = (w_A>self.cut_off).float()
-            w_B = (w_B>self.cut_off).float()
-            
-            for _ in range(1): 
+            for _ in range(3): 
                 self.optimizer_Dis_m.zero_grad() 
-                loss_mDis_A = (w_A * F.softplus(-self.Dis_Z(z_A.detach()).view(-1))).sum() / (w_A.sum() + 1e-6) 
-                loss_mDis_B = (w_B * F.softplus(self.Dis_Z(z_B.detach()).view(-1))).sum() / (w_B.sum() + 1e-6) 
-                loss_dict['mDis'] = loss_mDis_A + loss_mDis_B 
+                loss_mDis_A = (F.softplus(-torch.clamp(self.Dis_Z(z_A[mask_A].detach()), -margin, margin))).mean()
+                loss_mDis_B = (F.softplus(torch.clamp(self.Dis_Z(z_B[mask_B].detach()), -margin, margin))).mean()
+                loss_dict['mDis'] = loss_mDis_A + loss_mDis_B
                 loss_dict['mDis'].backward() 
                 self.optimizer_Dis_m.step()
 
@@ -163,14 +162,22 @@ class IntegrationModel:
                 loss_dict['bDis'] = torch.tensor(0.0, device=self.device)
 
             # generator loss
-            loss_mGAN_A = (w_A * F.softplus(-torch.clamp(self.Dis_Z(z_A).view(-1), -margin, margin))).sum() / (w_A.sum() + 1e-6) 
-            loss_mGAN_B = (w_B * F.softplus(torch.clamp(self.Dis_Z(z_B).view(-1), -margin, margin))).sum() / (w_B.sum() + 1e-6) 
-            loss_dict['mGAN'] = -(loss_mGAN_A + loss_mGAN_B)
-            loss_dict['bGAN'] = -self.compute_discriminator_loss_intra(z_A, z_B, batch_A, batch_B)
+            loss_mGAN_A = -(F.softplus(-torch.clamp(self.Dis_Z(z_A[mask_A]), -margin, margin))).mean()
+            loss_mGAN_B = -(F.softplus(torch.clamp(self.Dis_Z(z_B[mask_B]), -margin, margin))).mean()
+            loss_dict['mGAN'] = loss_mGAN_A + loss_mGAN_B
+            loss_dict['bGAN'] = -self.compute_discriminator_loss_intra(z_A, z_B, batch_A, batch_B)           
+            
+            # semi-supervised clip loss(optional)
+            if self.use_prior:
+                prior_matrix = build_celltype_prior(batch_A['celltype'], batch_B['celltype']).to(self.device)
+                loss_dict['CLIP'] = generalized_clip_loss_stable_masked(z_A, z_B, prior_matrix)
+            else:
+                loss_dict['CLIP'] = torch.tensor(0.0, device=self.device)
             
             total_loss = (
                 self.lambdaRecon * loss_dict['AE']
                 + self.lambdaLA * loss_dict['LA']
+                + self.lambdaDA * loss_dict['DA']
                 + self.lambdaBM * loss_dict['BM']
                 + self.lambdamGAN * loss_dict['mGAN']
                 + self.lambdabGAN * loss_dict['bGAN']
@@ -321,6 +328,7 @@ class IntegrationModel:
             f"Step {step} | "
             f"loss_Recon: {self.lambdaRecon * loss_dict['AE']:.4f} | "
             f"loss_LA: {self.lambdaLA * loss_dict['LA']:.4f} | "
+            f"loss_DA: {self.lambdaDA * loss_dict['DA']:.4f} | "
             f"loss_BM: {self.lambdaBM * loss_dict['BM']:.4f} | "
             f"loss_CLIP: {self.lambdaCLIP * loss_dict['CLIP']:.4f} | "
             f"loss_mGAN: {loss_dict['mGAN']:.4f}| "
