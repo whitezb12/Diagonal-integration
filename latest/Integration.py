@@ -26,7 +26,6 @@ class IntegrationModel:
         lambdaRecon: float = 10.0,
         lambdaLA: float = 10.0,
         lambdaDA: float = 1.0,
-        lambdaBM: float = 1.0,
         lambdamGAN: float = 1.0,
         lambdabGAN: float = 1.0,
         lambdaCLIP: float = 0.1,
@@ -52,7 +51,6 @@ class IntegrationModel:
         self.lambdaRecon = lambdaRecon        
         self.lambdaLA = lambdaLA
         self.lambdaDA = lambdaDA
-        self.lambdaBM = lambdaBM
         self.lambdamGAN = lambdamGAN
         self.lambdabGAN = lambdabGAN
         self.lambdaCLIP = lambdaCLIP        
@@ -211,18 +209,7 @@ class IntegrationModel:
             # latent align loss
             loss_LA_AtoB = torch.mean((mu_A - mu_AtoB)**2) 
             loss_LA_BtoA = torch.mean((mu_B - mu_BtoA)**2) 
-            loss_LA = loss_LA_AtoB + loss_LA_BtoA             
-
-            # # input autoencoder loss
-            # beta = 0.01
-            # loss_AE_A = torch.mean((x_Arecon[mask_A] - x_A[mask_A])**2) + beta * kl_divergence(mu_A[mask_A], logvar_A[mask_A])
-            # loss_AE_B = torch.mean((x_Brecon[mask_B] - x_B[mask_B])**2) + beta * kl_divergence(mu_B[mask_B], logvar_B[mask_B])
-            # loss_AE = loss_AE_A + loss_AE_B
-
-            # # latent align loss
-            # loss_LA_AtoB = torch.mean((mu_A[mask_A] - mu_AtoB[mask_A])**2) 
-            # loss_LA_BtoA = torch.mean((mu_B[mask_B] - mu_BtoA[mask_B])**2) 
-            # loss_LA = loss_LA_AtoB + loss_LA_BtoA             
+            loss_LA = loss_LA_AtoB + loss_LA_BtoA                        
             
             z_A_s = z_A[mask_A]
             z_B_s = z_B[mask_B]
@@ -235,13 +222,6 @@ class IntegrationModel:
             # distribution alignment loss(shared onbly)
             z_dist_s = pairwise_euclidean_distance(mu_A[mask_A], mu_B[mask_B]) + pairwise_euclidean_distance(sigma_A[mask_A], sigma_B[mask_B])
             loss_DA = torch.sum(P_s * z_dist_s) / torch.sum(P_s)
-
-            # Barycenter Mapping loss
-            L_A = Graph_Laplacian_torch(x_A[mask_A], nearest_neighbor=min(10, z_A_s.size(0) - 1))
-            L_B = Graph_Laplacian_torch(x_B[mask_B], nearest_neighbor=min(10, z_B_s.size(0) - 1))
-            z_A_new = Transform(z_A_s, z_B_s, P_s, L_A, lamda_Eigenvalue=0.5)
-            z_B_new = Transform(z_B_s, z_A_s, P_s.t(), L_B, lamda_Eigenvalue=0.5)
-            loss_BM = torch.mean((z_A_s - z_A_new) ** 2) + torch.mean((z_B_s - z_B_new) ** 2)
 
             # discriminator loss
             margin = 5.0
@@ -278,7 +258,6 @@ class IntegrationModel:
                 self.lambdaRecon * loss_AE
                 + self.lambdaLA * loss_LA
                 + self.lambdaDA * loss_DA
-                + self.lambdaBM * loss_BM
                 + self.lambdaCLIP * loss_CLIP
                 + self.lambdamGAN * loss_mGAN
                 + self.lambdabGAN * loss_bGAN
@@ -295,7 +274,6 @@ class IntegrationModel:
                     f"AE: {loss_AE:.4f} | "
                     f"LA: {loss_LA:.4f} | "
                     f"DA: {loss_DA:.4f} | "
-                    f"BM: {loss_BM:.4f} | "
                     f"CLIP: {loss_CLIP:.4f} | "
                     f"mGAN: {loss_mGAN:.4f} | "
                     f"bGAN: {loss_bGAN:.4f}"
