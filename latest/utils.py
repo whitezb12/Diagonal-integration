@@ -170,6 +170,16 @@ def pairwise_euclidean_distance(
     return torch.mean((X_col - Y_row) ** 2, dim=-1)
 
 
+def pairwise_cosine(
+        A: torch.Tensor, 
+        B: Optional[torch.Tensor] = None, 
+        eps: float = 1e-8):
+    B = A if B is None else B
+    A_norm = A / (torch.linalg.norm(A, dim=1, keepdim=True) + eps)
+    B_norm = B / (torch.linalg.norm(B, dim=1, keepdim=True) + eps)
+    return A_norm @ B_norm.T
+
+
 def unbalanced_ot(
     cost_pp: torch.Tensor,
     reg: float = 0.05,
@@ -207,7 +217,7 @@ def Graph_Laplacian_torch(
     t: float = 1.0
 ) -> torch.Tensor:
     XX = X.detach()
-    D = pairwise_euclidean_distance(XX, clip=True)
+    D = torch.cdist(XX, XX, p=2)
     values, indices = torch.topk(D, nearest_neighbor + 1, dim=1, largest=False)
     pos = D > values[:, nearest_neighbor].view(-1, 1)
     D[pos] = 0.0
