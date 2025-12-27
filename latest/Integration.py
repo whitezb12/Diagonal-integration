@@ -23,14 +23,14 @@ class IntegrationModel:
         warmups: int = 4000,
         seed: int = 1234,
         n_latent: int = 10,
-        cut_off: float = 0.9,
         lambdaRecon: float = 10.0,
         lambdaLA: float = 10.0,
         lambdaDA: float = 1.0,
         lambdaBM: float = 1.0,
         lambdamGAN: float = 1.0,
         lambdabGAN: float = 1.0,
-        lambdaCLIP: float = 0.1,
+        lambdaCLIP: float = 0.1,       
+        cut_off: float = 0.9,
         use_prior: bool = False,
         celltype_col: Optional[str] = None,
         source_col: Optional[str] = None,
@@ -416,6 +416,7 @@ class IntegrationModel:
         for model in [self.E_A, self.E_B, self.G_A, self.G_B, self.Dis_Z, self.Dis_A, self.Dis_B]:
             if model is not None:
                 model.eval()
+
 
 
 
