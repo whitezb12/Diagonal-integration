@@ -29,7 +29,7 @@ class IntegrationModel:
         lambdaBM: float = 1.0,
         lambdamGAN: float = 1.0,
         lambdabGAN: float = 1.0,
-        lambdaCLIP: float = 0.1,       
+        lambdaCLIP: float = 0.1,
         cut_off: float = 0.9,
         use_prior: bool = False,
         celltype_col: Optional[str] = None,
@@ -226,7 +226,7 @@ class IntegrationModel:
             
             z_A_s = z_A[mask_A]
             z_B_s = z_B[mask_B]
-
+            
             # optimal transport process(shared only)
             C = pairwise_correlation_distance(batch_A['link_feat'], batch_B['link_feat']).to(self.device)
             C_s = C[mask_A][:, mask_B]
@@ -237,10 +237,10 @@ class IntegrationModel:
             loss_DA = torch.sum(P_s * z_dist_s) / torch.sum(P_s)
 
             # Barycenter Mapping loss
-            L_A = Graph_Laplacian_torch(z_A_s, nearest_neighbor=min(10, z_A_s.size(0) - 1))
-            L_B = Graph_Laplacian_torch(z_B_s, nearest_neighbor=min(10, z_B_s.size(0) - 1))
-            z_A_new = Transform(x_A[mask_A], z_B_s, P_s, L_A, lamda_Eigenvalue=0.5)
-            z_B_new = Transform(x_B[mask_B], z_A_s, P_s.t(), L_B, lamda_Eigenvalue=0.5)
+            L_A = Graph_Laplacian_torch(x_A[mask_A], nearest_neighbor=min(10, z_A_s.size(0) - 1))
+            L_B = Graph_Laplacian_torch(x_B[mask_B], nearest_neighbor=min(10, z_B_s.size(0) - 1))
+            z_A_new = Transform(z_A_s, z_B_s, P_s, L_A, lamda_Eigenvalue=0.5)
+            z_B_new = Transform(z_B_s, z_A_s, P_s.t(), L_B, lamda_Eigenvalue=0.5)
             loss_BM = torch.mean((z_A_s - z_A_new) ** 2) + torch.mean((z_B_s - z_B_new) ** 2)
 
             # discriminator loss
@@ -416,7 +416,6 @@ class IntegrationModel:
         for model in [self.E_A, self.E_B, self.G_A, self.G_B, self.Dis_Z, self.Dis_A, self.Dis_B]:
             if model is not None:
                 model.eval()
-
 
 
 
