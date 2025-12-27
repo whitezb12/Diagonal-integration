@@ -49,14 +49,14 @@ class IntegrationModel:
         self.training_steps = training_steps
         self.warmups = warmups
         self.n_latent = n_latent
-        self.cut_off = cut_off
         self.lambdaRecon = lambdaRecon        
         self.lambdaLA = lambdaLA
         self.lambdaDA = lambdaDA
         self.lambdaBM = lambdaBM
         self.lambdamGAN = lambdamGAN
         self.lambdabGAN = lambdabGAN
-        self.lambdaCLIP = lambdaCLIP
+        self.lambdaCLIP = lambdaCLIP        
+        self.cut_off = cut_off
         self.use_prior = use_prior
         self.celltype_col = celltype_col
         self.source_col = source_col
@@ -212,9 +212,6 @@ class IntegrationModel:
             loss_LA_AtoB = torch.mean((mu_A - mu_AtoB)**2) 
             loss_LA_BtoA = torch.mean((mu_B - mu_BtoA)**2) 
             loss_LA = loss_LA_AtoB + loss_LA_BtoA             
-            
-            z_A_s = z_A[mask_A]
-            z_B_s = z_B[mask_B]
 
             # # input autoencoder loss
             # beta = 0.01
@@ -227,8 +224,9 @@ class IntegrationModel:
             # loss_LA_BtoA = torch.mean((mu_B[mask_B] - mu_BtoA[mask_B])**2) 
             # loss_LA = loss_LA_AtoB + loss_LA_BtoA             
             
-            # z_A_s = z_A[mask_A]
-            # z_B_s = z_B[mask_B]
+            z_A_s = z_A[mask_A]
+            z_B_s = z_B[mask_B]
+
             # optimal transport process(shared only)
             C = pairwise_correlation_distance(batch_A['link_feat'], batch_B['link_feat']).to(self.device)
             C_s = C[mask_A][:, mask_B]
@@ -241,8 +239,8 @@ class IntegrationModel:
             # Barycenter Mapping loss
             L_A = Graph_Laplacian_torch(z_A_s, nearest_neighbor=min(10, z_A_s.size(0) - 1))
             L_B = Graph_Laplacian_torch(z_B_s, nearest_neighbor=min(10, z_B_s.size(0) - 1))
-            z_A_new = Transform(z_A_s, z_B_s, P_s, L_A, lamda_Eigenvalue=0.5)
-            z_B_new = Transform(z_B_s, z_A_s, P_s.t(), L_B, lamda_Eigenvalue=0.5)
+            z_A_new = Transform(x_A[mask_A], z_B_s, P_s, L_A, lamda_Eigenvalue=0.5)
+            z_B_new = Transform(x_B[mask_B], z_A_s, P_s.t(), L_B, lamda_Eigenvalue=0.5)
             loss_BM = torch.mean((z_A_s - z_A_new) ** 2) + torch.mean((z_B_s - z_B_new) ** 2)
 
             # discriminator loss
