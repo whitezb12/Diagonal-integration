@@ -313,4 +313,3 @@ def zscore_numpy(X: np.ndarray, axis: int = 0, eps: float = 1e-8) -> np.ndarray:
 def kl_divergence(mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
     kl = -0.5 * (1 + logvar - mu.pow(2) - logvar.exp())
     return kl.mean()
-
