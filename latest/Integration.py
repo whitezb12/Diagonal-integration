@@ -20,7 +20,7 @@ class IntegrationModel:
         input_key: List[Optional[str]] = ['X_pca', 'X_lsi'],
         batch_size: int = 500,
         training_steps: int = 10000,
-        warmups: int = 4000,
+        warmups: int = 3000,
         seed: int = 1234,
         n_latent: int = 10,
         lambdaRecon: float = 10.0,
@@ -170,7 +170,7 @@ class IntegrationModel:
         iterator_A = iter(self.dataloader_A)
         iterator_B = iter(self.dataloader_B)
 
-        for step in range(self.warmups+1, self.training_steps+1):
+        for step in range(self.training_steps+1):
 
             batch_A = next(iterator_A)
             batch_B = next(iterator_B)
@@ -217,9 +217,9 @@ class IntegrationModel:
             # optimal transport process(shared only)
             C = pairwise_correlation_distance(batch_A['link_feat'], batch_B['link_feat']).to(self.device)
             C_s = C[mask_A][:, mask_B]
-            P_s = unbalanced_ot(cost_pp=C_s, reg=0.05, reg_m=0.5, device=self.device)  
+            P_s = unbalanced_ot(cost_pp=C_s, reg=0.1, reg_m=1.0, device=self.device) 
 
-            # distribution alignment loss(shared onbly)
+            # distribution alignment loss(shared only)
             z_dist_s = pairwise_euclidean_distance(mu_A[mask_A], mu_B[mask_B]) + pairwise_euclidean_distance(sigma_A[mask_A], sigma_B[mask_B])
             loss_DA = torch.sum(P_s * z_dist_s) / torch.sum(P_s)
 
@@ -394,7 +394,6 @@ class IntegrationModel:
         for model in [self.E_A, self.E_B, self.G_A, self.G_B, self.Dis_Z, self.Dis_A, self.Dis_B]:
             if model is not None:
                 model.eval()
-
 
 
 
