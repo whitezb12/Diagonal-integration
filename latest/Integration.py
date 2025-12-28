@@ -224,8 +224,11 @@ class IntegrationModel:
             loss_DA = torch.sum(P_s * z_dist_s) / torch.sum(P_s)
 
             # discriminator loss
-            margin = 5.0
-            for _ in range(3): 
+            if step < 5:
+                margin = 50.0
+            else:
+                margin = 5.0
+            for _ in range(5): 
                 self.optimizer_Dis_m.zero_grad() 
                 loss_mDis_A = (F.softplus(-torch.clamp(self.Dis_Z(z_A_s.detach()), -margin, margin))).mean()
                 loss_mDis_B = (F.softplus(torch.clamp(self.Dis_Z(z_B_s.detach()), -margin, margin))).mean()
