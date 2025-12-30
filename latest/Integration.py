@@ -142,7 +142,7 @@ class IntegrationModel:
 
             # optimal transport process
             C = pairwise_correlation_distance(batch_A['link_feat'], batch_B['link_feat']).to(self.device)
-            P = unbalanced_ot(C, reg=0.05, reg_m=0.5, device=self.device)
+            P = unbalanced_ot(C, reg=0.1, reg_m=1.0, prune_topk=3, device=self.device)
 
             # distribution alignment loss
             z_dist = pairwise_euclidean_distance(mu_A, mu_B) + pairwise_euclidean_distance(sigma_A, sigma_B)
@@ -217,7 +217,7 @@ class IntegrationModel:
             # optimal transport process(shared only)
             C = pairwise_correlation_distance(batch_A['link_feat'], batch_B['link_feat']).to(self.device)
             C_s = C[mask_A][:, mask_B]
-            P_s = unbalanced_ot(cost_pp=C_s, reg=0.1, reg_m=1.0, device=self.device) 
+            P_s = unbalanced_ot(C_s, reg=0.1, reg_m=1.0, prune_topk=2, device=self.device)
 
             # distribution alignment loss(shared only)
             z_dist_s = pairwise_euclidean_distance(mu_A[mask_A], mu_B[mask_B]) + pairwise_euclidean_distance(sigma_A[mask_A], sigma_B[mask_B])
@@ -228,7 +228,7 @@ class IntegrationModel:
                 margin = 50.0
             else:
                 margin = 5.0
-            for _ in range(5): 
+            for _ in range(3): 
                 self.optimizer_Dis_m.zero_grad() 
                 loss_mDis_A = (F.softplus(-torch.clamp(self.Dis_Z(z_A_s.detach()), -margin, margin))).mean()
                 loss_mDis_B = (F.softplus(torch.clamp(self.Dis_Z(z_B_s.detach()), -margin, margin))).mean()
@@ -397,7 +397,6 @@ class IntegrationModel:
         for model in [self.E_A, self.E_B, self.G_A, self.G_B, self.Dis_Z, self.Dis_A, self.Dis_B]:
             if model is not None:
                 model.eval()
-
 
 
 
