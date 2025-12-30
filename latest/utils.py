@@ -186,7 +186,9 @@ def unbalanced_ot(
     reg_m: float = 0.5,
     prior: Optional[torch.Tensor] = None,
     device: str = 'cpu',
-    max_iteration: Dict[str, int] = {'outer': 10, 'inner': 5}
+    max_iteration: Dict[str, int] = {'outer': 10, 'inner': 5},
+    prune_topk: Optional[int] = None,      
+    prune_global_topk: Optional[int] = None 
 ) -> Optional[torch.Tensor]:
     ns, nt = cost_pp.shape
     if prior is not None:
@@ -208,6 +210,26 @@ def unbalanced_ot(
         tran = (dual @ torch.t(b)) * kernel
 
     out = tran.detach()
+
+    if prune_topk is not None:
+        mask_row = torch.zeros_like(out)
+        vals_row, idx_row = torch.topk(out, k=prune_topk, dim=1)
+        mask_row.scatter_(1, idx_row, 1.0)
+
+        mask_col = torch.zeros_like(out)
+        vals_col, idx_col = torch.topk(out, k=prune_topk, dim=0)
+        mask_col.scatter_(0, idx_col, 1.0)
+
+        mask = mask_row * mask_col  
+        out = out * mask
+
+    if prune_global_topk is not None:
+        flat_vals, flat_idx = torch.topk(out.flatten(), k=prune_global_topk)
+        mask_global = torch.zeros_like(out).flatten()
+        mask_global[flat_idx] = 1.0
+        mask_global = mask_global.view_as(out)
+        out = out * mask_global
+
     return None if torch.isnan(out).sum() > 0 else out
 
 
@@ -313,3 +335,4 @@ def zscore_numpy(X: np.ndarray, axis: int = 0, eps: float = 1e-8) -> np.ndarray:
 def kl_divergence(mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
     kl = -0.5 * (1 + logvar - mu.pow(2) - logvar.exp())
     return kl.mean()
+
