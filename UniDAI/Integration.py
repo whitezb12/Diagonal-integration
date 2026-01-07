@@ -19,7 +19,7 @@ class IntegrationModel:
         adata_B: "anndata.AnnData",
         input_key: List[Optional[str]] = ['X_pca', 'X_lsi'],
         batch_size: int = 500,
-        stage1_steps: int = 3000,
+        stage1_steps: int = 2000,
         stage2_steps: int = 3000,
         stage3_steps: int = 10000,
         seed: int = 1234,
@@ -181,9 +181,8 @@ class IntegrationModel:
             x_A = batch_A['input'].float().to(self.device)
             x_B = batch_B['input'].float().to(self.device)
 
-            with torch.no_grad():
-                _, link_A, _ = self.E_A_slow(x_A)
-                _, link_B, _ = self.E_B_slow(x_B)
+            _, link_A, _ = self.E_A_slow(x_A)
+            _, link_B, _ = self.E_B_slow(x_B)
 
             z_A, mu_A, logvar_A = self.E_A_fast(x_A)
             z_B, mu_B, logvar_B = self.E_B_fast(x_B)
@@ -209,7 +208,7 @@ class IntegrationModel:
             loss_LA = loss_LA_AtoB + loss_LA_BtoA                     
             
             # optimal transport process
-            C = pairwise_correlation_distance_sparse(link_A, link_B, topk=3).to(self.device)
+            C = pairwise_correlation_distance(link_A, link_B).to(self.device)
             P = unbalanced_ot(C, reg=0.05, reg_m=0.1, device=self.device)
             
             # distribution alignment 
@@ -239,6 +238,7 @@ class IntegrationModel:
 
         self._hard_update(self.E_A_fast, self.E_A_slow)
         self._hard_update(self.E_B_fast, self.E_B_slow)
+        
 
     def _train_stage3(self, training_steps):
 
@@ -257,9 +257,8 @@ class IntegrationModel:
             x_A = batch_A['input'].float().to(self.device)
             x_B = batch_B['input'].float().to(self.device)
 
-            with torch.no_grad():
-                _, link_A, _ = self.E_A_slow(x_A)
-                _, link_B, _ = self.E_B_slow(x_B)
+            _, link_A, _ = self.E_A_slow(x_A)
+            _, link_B, _ = self.E_B_slow(x_B)
 
             z_A, mu_A, logvar_A = self.E_A_fast(x_A)
             z_B, mu_B, logvar_B = self.E_B_fast(x_B)
@@ -383,9 +382,8 @@ class IntegrationModel:
         x_A = torch.stack([self.dataset_A[i]['input'] for i in range(len(self.dataset_A))]).float().to(self.device)
         x_B = torch.stack([self.dataset_B[i]['input'] for i in range(len(self.dataset_B))]).float().to(self.device)
 
-        with torch.no_grad():
-            _, mu_A, _ = self.E_A_slow(x_A)
-            _, mu_B, _ = self.E_B_slow(x_B)
+        _, mu_A, _ = self.E_A_slow(x_A)
+        _, mu_B, _ = self.E_B_slow(x_B)
         
         latent_A = mu_A.cpu().numpy()
         latent_B = mu_B.cpu().numpy()
@@ -410,6 +408,7 @@ class IntegrationModel:
 
         _, mu_A, _ = self.E_A_slow(x_A)
         _, mu_B, _ = self.E_B_slow(x_B)
+
         x_AtoB = self.G_B(mu_A)
         x_BtoA = self.G_A(mu_B)
         self.imputed_BtoA = x_BtoA.cpu().numpy()
@@ -558,6 +557,5 @@ class IntegrationModel:
                 'G_B': self.G_B.state_dict(),
             }
             torch.save(state, os.path.join(model_path, "ckpt.pth"))
-
 
 
