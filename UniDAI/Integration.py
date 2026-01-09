@@ -87,17 +87,18 @@ class IntegrationModel:
         begin_time = time.time()
         print("Training started at:", time.asctime())
 
-        self._train_stage1(self.stage1_steps)
-        self._train_stage2(self.stage2_steps)
+        self.train_stage1(self.stage1_steps)
+        self.train_stage2(self.stage2_steps)
         if self.use_mask:
             self.update_shared_mask()
-        self._train_stage3(self.stage3_steps)
+        self._init_models_and_optimizers()
+        self.train_stage3(self.stage3_steps)
         
         self.train_time = time.time() - begin_time
         print(f"Training finished. Time: {self.train_time:.2f} sec")
 
     
-    def _train_stage1(self, training_steps):
+    def train_stage1(self, training_steps):
 
         self._init_models_and_optimizers()
         self._init_low_encoders()
@@ -160,12 +161,11 @@ class IntegrationModel:
 
             if step % 500 == 0:
                 print(f"[Stage1 {step}] AE: {loss_AE:.4f} | LA: {loss_LA:.4f} | DA: {loss_DA:.4f} ")
-        
-        self._hard_update(self.E_A_fast, self.E_A_slow)
-        self._hard_update(self.E_B_fast, self.E_B_slow)    
+          
 
-    def _train_stage2(self, training_steps):
+    def train_stage2(self, training_steps):
 
+        self.update_slow_encoder()
         self._set_train_mode()
 
         print("===== Stage 2: Iterative Alignment =====")
@@ -226,21 +226,16 @@ class IntegrationModel:
             torch.nn.utils.clip_grad_norm_(self.params_G, 5.0)
             self.optimizer_G.step()
 
-            if step % 1000 == 0:
+            if step % 500 == 0:
                 print(
                     f"[Stage2 {step}] "
                     f"AE: {loss_AE:.4f} | "
                     f"LA: {loss_LA:.4f} | "
                     f"DA: {loss_DA:.4f}  "
                 )
-                self._hard_update(self.E_A_fast, self.E_A_slow)
-                self._hard_update(self.E_B_fast, self.E_B_slow)
-
-        self._hard_update(self.E_A_fast, self.E_A_slow)
-        self._hard_update(self.E_B_fast, self.E_B_slow)
         
 
-    def _train_stage3(self, training_steps):
+    def train_stage3(self, training_steps):
 
         self._set_train_mode()
 
@@ -292,7 +287,7 @@ class IntegrationModel:
             loss_LA = loss_LA_AtoB + loss_LA_BtoA                     
             
             # optimal transport process
-            C = pairwise_correlation_distance(link_A, link_B).to(self.device)
+            C = pairwise_correlation_distance(link_A, link_B).to(self.device) 
             P = unbalanced_ot(C, reg=0.05, reg_m=0.1, device=self.device)
 
             # distribution alignment 
@@ -300,7 +295,7 @@ class IntegrationModel:
             loss_DA = torch.sum(P * z_dist) / torch.sum(P)
 
             # discriminator loss
-            for _ in range(3):
+            for _ in range(5):
                 self.optimizer_Dis_m.zero_grad() 
                 loss_mDis_A = (F.softplus(-self.Dis_Z(z_A[mask_A].detach()))).mean()
                 loss_mDis_B = (F.softplus(self.Dis_Z(z_B[mask_B].detach()))).mean()
@@ -354,9 +349,6 @@ class IntegrationModel:
                     f"bGAN: {loss_bGAN:.4f}"
                 )
         
-        self._hard_update(self.E_A_fast, self.E_A_slow)
-        self._hard_update(self.E_B_fast, self.E_B_slow) 
-        
 
     def get_latent_representation(self) -> None:
         self._set_eval_mode()
@@ -365,8 +357,9 @@ class IntegrationModel:
         x_A = torch.stack([self.dataset_A[i]['input'] for i in range(len(self.dataset_A))]).float().to(self.device)
         x_B = torch.stack([self.dataset_B[i]['input'] for i in range(len(self.dataset_B))]).float().to(self.device)
 
-        _, mu_A, _ = self.E_A_slow(x_A)
-        _, mu_B, _ = self.E_B_slow(x_B)
+        with torch.no_grad():
+            _, mu_A, _ = self.E_A_fast(x_A)
+            _, mu_B, _ = self.E_B_fast(x_B)
 
         self.latent = np.concatenate((mu_A.cpu().numpy(), mu_B.cpu().numpy()), axis=0)
         end_time = time.time()
@@ -377,19 +370,17 @@ class IntegrationModel:
         print(f"Latent space shape: {self.latent.shape}")
     
 
-    def update_shared_mask(self, resolution=1.0, min_shared_frac=0.05, min_similarity=0.95) -> None:
+    def update_shared_mask(self, resolution=1.0, min_shared_frac=0.05, min_similarity=0.9) -> None:
         print("Update shared mask...")
         x_A = torch.stack([self.dataset_A[i]['input'] for i in range(len(self.dataset_A))]).float().to(self.device)
         x_B = torch.stack([self.dataset_B[i]['input'] for i in range(len(self.dataset_B))]).float().to(self.device)
 
-        _, mu_A, _ = self.E_A_slow(x_A)
-        _, mu_B, _ = self.E_B_slow(x_B)
-        
-        latent_A = mu_A.cpu().numpy()
-        latent_B = mu_B.cpu().numpy()
+        with torch.no_grad():
+            _, mu_A, _ = self.E_A_fast(x_A)
+            _, mu_B, _ = self.E_B_fast(x_B)
 
-        self.is_shared_A, self.is_shared_B = leiden_shared_mask(z_A=latent_A, 
-                                                                z_B=latent_B, 
+        self.is_shared_A, self.is_shared_B = leiden_shared_mask(z_A=mu_A.cpu().numpy(), 
+                                                                z_B=mu_B.cpu().numpy(), 
                                                                 resolution=resolution,
                                                                 min_shared_frac=min_shared_frac,
                                                                 min_similarity=min_similarity,
@@ -406,8 +397,9 @@ class IntegrationModel:
         x_A = torch.cat([self.dataset_A[i]['input'].float().unsqueeze(0) for i in range(len(self.dataset_A))], dim=0).to(self.device)
         x_B = torch.cat([self.dataset_B[i]['input'].float().unsqueeze(0) for i in range(len(self.dataset_B))], dim=0).to(self.device)
 
-        _, mu_A, _ = self.E_A_slow(x_A)
-        _, mu_B, _ = self.E_B_slow(x_B)
+        with torch.no_grad():
+            _, mu_A, _ = self.E_A_fast(x_A)
+            _, mu_B, _ = self.E_B_fast(x_B)
 
         x_AtoB = self.G_B(mu_A)
         x_BtoA = self.G_A(mu_B)
@@ -527,6 +519,11 @@ class IntegrationModel:
         slow.load_state_dict(fast.state_dict())
 
 
+    def update_slow_encoder(self)-> None:
+        self._hard_update(self.E_A_fast, self.E_A_slow)
+        self._hard_update(self.E_B_fast, self.E_B_slow) 
+
+
     def _set_train_mode(self) -> None:
         for model in [
             self.E_A_fast, self.E_B_fast,
@@ -557,5 +554,4 @@ class IntegrationModel:
                 'G_B': self.G_B.state_dict(),
             }
             torch.save(state, os.path.join(model_path, "ckpt.pth"))
-
 
